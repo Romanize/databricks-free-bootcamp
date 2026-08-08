@@ -152,12 +152,14 @@ that is expected, there is no web UI on this app.
 
 ### Latest deploy
 
-For validation and checking on how the agents works + checking dashboard you can access
-the following links:
+For validation and checking on how the agents works + checking dashboard we checked on
+following links, but workspace access is required.
 
 1. Dashboard
+   https://databricks-fbc-hw3-dashboard-7474651537600327.aws.databricksapps.com/
 
 2. Mcp server
+   https://mcp-databricks-fbc-hw3-7474651537600327.aws.databricksapps.com
 
 ## The dashboard
 
