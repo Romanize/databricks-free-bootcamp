@@ -7,6 +7,9 @@ Resolution order for the connection URL:
 
 The URL is a standard Postgres URL for a native-password Lakebase role, e.g.
 postgresql://role:password@host:5432/databricks_postgres?sslmode=require
+
+The scope/key default to this homework's own secret (homework-2/lakebase-url,
+created by setup_secrets.py), so it never shares state with another homework.
 """
 
 import base64
@@ -17,7 +20,7 @@ from functools import lru_cache
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-SCOPE = os.environ.get("LAKEBASE_SECRET_SCOPE", "database")
+SCOPE = os.environ.get("LAKEBASE_SECRET_SCOPE", "homework-2")
 KEY = os.environ.get("LAKEBASE_SECRET_KEY", "lakebase-url")
 
 

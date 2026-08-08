@@ -3,8 +3,9 @@ command:
   - "app.py"
 
 env:
+  # Homework-scoped secret: see setup_secrets.py in this folder.
   - name: LAKEBASE_SECRET_SCOPE
-    value: "database"
+    value: "homework-2"
   - name: LAKEBASE_SECRET_KEY
     value: "lakebase-url"
   - name: EMBEDDING_MODEL

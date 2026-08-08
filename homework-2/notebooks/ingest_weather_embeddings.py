@@ -14,9 +14,9 @@
 # MAGIC    `execute_values`, casting each vector with `%s::vector`.
 # MAGIC
 # MAGIC Everything runs in plain Python - **no `spark.write.jdbc`**, which is not
-# MAGIC supported against this Lakebase instance. It reuses the same Lakebase
-# MAGIC secret (`database` / `lakebase-url`) as the Flask app, so no new secrets
-# MAGIC are needed.
+# MAGIC supported against this Lakebase instance. It reads the same homework-scoped
+# MAGIC Lakebase secret as the Flask app (`homework-2` / `lakebase-url`, created by
+# MAGIC `setup_secrets.py`), so there is nothing extra to configure.
 # MAGIC
 # MAGIC Runs unchanged as a Databricks notebook or as a local script:
 # MAGIC
