@@ -1,0 +1,22 @@
+command:
+  - "python"
+  - "app.py"
+
+env:
+  - name: LAKEBASE_SECRET_SCOPE
+    value: "database"
+  - name: LAKEBASE_SECRET_KEY
+    value: "lakebase-url"
+  - name: EMBEDDING_MODEL
+    value: "sentence-transformers/all-MiniLM-L6-v2"
+  # sentence-transformers needs a writable cache for the downloaded weights.
+  - name: SENTENCE_TRANSFORMERS_HOME
+    value: "/tmp/.cache/huggingface"
+  - name: HF_HOME
+    value: "/tmp/.cache/huggingface"
+  # NWS asks clients to identify themselves with a contact address.
+  - name: WEATHER_USER_AGENT
+    value: "databricks-free-bootcamp-hw2 (robert.g.martinez.a@gmail.com)"
+  # Optional stretch goal: a serving endpoint for GET /weather/search?summarize=1
+  # - name: WEATHER_SUMMARY_ENDPOINT
+  #   value: "databricks-meta-llama-3-3-70b-instruct"

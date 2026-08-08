@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weather Intelligence - Lakebase Vector Search</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Weather Intelligence</h1>
+    <p class="subtitle">
+      National Weather Service alerts and forecasts, embedded into Lakebase
+      (Postgres + pgvector) and retrieved by cosine similarity.
+    </p>
+    <div class="stats" id="stats"></div>
+  </header>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <div class="layout">
+    <section class="panel">
+      <h2>1. Harvest &amp; embed</h2>
+      <form id="sync-form">
+        <label for="locations">Locations (one per line)</label>
+        <textarea id="locations" rows="4"
+                  placeholder="Chicago, IL&#10;Austin, TX&#10;41.88,-87.63"></textarea>
+        <label for="sync-limit">Max documents per location</label>
+        <input type="number" id="sync-limit" value="50" min="1" max="200">
+        <button type="submit" id="sync-btn">Sync from NWS</button>
+      </form>
+
+      <p class="hint">
+        Sync writes raw text into <code>weather_documents</code>. Embedding
+        chunks it, runs all-MiniLM-L6-v2 and writes 384-dim vectors into
+        <code>weather_embeddings</code> (first run downloads the model, so it
+        can take a minute).
+      </p>
+      <button type="button" id="embed-btn" class="secondary">Embed pending documents</button>
+
+      <hr>
+
+      <h2>Recent documents</h2>
+      <ul class="doc-list" id="doc-list"></ul>
+    </section>
+
+    <section class="panel">
+      <h2>2. Semantic search</h2>
+      <form id="search-form">
+        <label for="query">Query</label>
+        <input type="text" id="query" maxlength="500"
+               placeholder="flash flood risk this weekend" required>
+        <div class="row">
+          <div>
+            <label for="top-k">Top K</label>
+            <input type="number" id="top-k" value="5" min="1" max="20">
+          </div>
+          <div>
+            <label for="source-type">Source</label>
+            <select id="source-type">
+              <option value="all">All</option>
+              <option value="alert">Alerts</option>
+              <option value="forecast">Forecasts</option>
+            </select>
+          </div>
+        </div>
+        <button type="submit" id="search-btn">Search</button>
+      </form>
+
+      <ul class="result-list" id="results"></ul>
+    </section>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
