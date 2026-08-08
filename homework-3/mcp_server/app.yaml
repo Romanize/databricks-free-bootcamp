@@ -1,0 +1,23 @@
+command:
+  - "python"
+  - "weather_mcp_server.py"
+
+env:
+  # The weather APIs are keyless. The only secret here is the Lakebase URL used
+  # to log tool calls for the dashboard app; see setup_secrets.py one level up.
+  - name: LAKEBASE_SECRET_SCOPE
+    value: "homework-3"
+  - name: LAKEBASE_SECRET_KEY
+    value: "lakebase-url"
+  # Set to "0" to run the MCP server with no database at all. The weather tools
+  # work either way; only the dashboard's history depends on this.
+  - name: WEATHER_LOG_TOOL_CALLS
+    value: "1"
+  # api.weather.gov asks clients to identify themselves with a contact address.
+  - name: WEATHER_USER_AGENT
+    value: "databricks-free-bootcamp-hw3 (robert.g.martinez.a@gmail.com)"
+  # "imperial" (F/mph/inch) or "metric" (C/kmh/mm); tools can override per call.
+  - name: WEATHER_DEFAULT_UNITS
+    value: "imperial"
+  - name: WEATHER_HTTP_TIMEOUT
+    value: "20"

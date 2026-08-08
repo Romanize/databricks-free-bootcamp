@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weather Agent Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Weather Agent Dashboard</h1>
+    <p>MCP tool calls made by the Agent Bricks weather agent.</p>
+  </header>
+
+  <section id="stats" class="stats"></section>
+
+  <section class="controls">
+    <label for="tool">Tool</label>
+    <select id="tool">
+      <option value="">All tools</option>
+      <option value="get_current_weather">get_current_weather</option>
+      <option value="get_forecast">get_forecast</option>
+      <option value="predict_umbrella_needed">predict_umbrella_needed</option>
+      <option value="get_severe_weather_alerts">get_severe_weather_alerts</option>
+      <option value="compare_locations_weather">compare_locations_weather</option>
+    </select>
+
+    <label for="limit">Show</label>
+    <select id="limit">
+      <option value="25">25</option>
+      <option value="50" selected>50</option>
+      <option value="100">100</option>
+    </select>
+
+    <button id="refresh" type="button">Refresh</button>
+    <label class="auto"><input type="checkbox" id="auto"> auto-refresh (10s)</label>
+    <span id="updated"></span>
+  </section>
+
+  <div id="error" class="error" hidden></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>When</th>
+        <th>Tool</th>
+        <th>Location</th>
+        <th>Status</th>
+        <th>Result</th>
+        <th>ms</th>
+      </tr>
+    </thead>
+    <tbody id="rows">
+      <tr><td colspan="6">Loading&hellip;</td></tr>
+    </tbody>
+  </table>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

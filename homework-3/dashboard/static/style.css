@@ -1,0 +1,45 @@
+:root { color-scheme: light dark; }
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: 0 auto;
+  max-width: 1100px;
+  padding: 1.5rem;
+  line-height: 1.5;
+}
+
+header h1 { margin-bottom: 0.2rem; }
+header p { margin-top: 0; opacity: 0.7; }
+
+.stats { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1rem 0; }
+.tile {
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  border-radius: 6px;
+  padding: 0.5rem 0.9rem;
+  min-width: 7rem;
+}
+.tile span { display: block; font-size: 0.75rem; opacity: 0.7; }
+.tile strong { font-size: 1.3rem; }
+
+.controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }
+.controls label { font-size: 0.85rem; opacity: 0.8; }
+.controls .auto { display: flex; align-items: center; gap: 0.3rem; }
+.controls #updated { font-size: 0.75rem; opacity: 0.6; margin-left: auto; }
+select, button { padding: 0.3rem 0.5rem; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+th, td { text-align: left; padding: 0.45rem 0.5rem; border-bottom: 1px solid rgba(128, 128, 128, 0.25); }
+th { font-size: 0.75rem; text-transform: uppercase; opacity: 0.7; }
+td code { font-size: 0.85em; }
+
+.badge { border-radius: 4px; padding: 0.1rem 0.45rem; font-size: 0.75rem; }
+.badge.success { background: rgba(40, 160, 90, 0.18); }
+.badge.error { background: rgba(200, 60, 60, 0.2); }
+
+.error {
+  border: 1px solid rgba(200, 60, 60, 0.5);
+  background: rgba(200, 60, 60, 0.12);
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+}
