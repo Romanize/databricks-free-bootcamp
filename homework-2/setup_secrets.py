@@ -39,9 +39,14 @@ w.secrets.put_secret(
 print(f"Stored secret {SCOPE}/{KEY}")
 
 # The app's service principal needs READ to fetch the secret at startup.
-w.secrets.put_acl(
-    scope=SCOPE,
-    principal="users",
-    permission=workspace.AclPermission.READ,
-)
-print(f"Granted READ on '{SCOPE}' to 'users'")
+APP_SERVICE_PRINCIPAL = input("Enter the app service principal UUID: ").strip()
+try:
+    w.secrets.put_acl(
+        scope=SCOPE,
+        principal=APP_SERVICE_PRINCIPAL,
+        permission=workspace.AclPermission.READ,
+    )
+    print(f"Granted READ on '{SCOPE}' to app '{APP_SERVICE_PRINCIPAL}'")
+except Exception as err:
+    print(f"Could not grant READ to '{APP_SERVICE_PRINCIPAL}': {err}")
+    print(f"Deploy the app first, then re-run this script or grant manually.")

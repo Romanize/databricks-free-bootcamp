@@ -21,7 +21,7 @@
 # MAGIC Runs unchanged as a Databricks notebook or as a local script:
 # MAGIC
 # MAGIC ```
-# MAGIC python notebooks/ingest_weather_embeddings.py --locations "Chicago, IL" "Austin, TX"
+# MAGIC python notebooks/ingest_weather_embeddings.py --locations "Chicago" "Austin"
 # MAGIC ```
 
 # COMMAND ----------
@@ -56,7 +56,7 @@ for candidate in (os.path.dirname(HERE), HERE):
     if candidate not in sys.path:
         sys.path.insert(0, candidate)
 
-DEFAULT_LOCATIONS = ["Chicago, IL", "Austin, TX", "Miami, FL", "Denver, CO"]
+DEFAULT_LOCATIONS = ["Chicago", "Austin", "Miami", "Denver", "Orlando"]
 
 try:
     dbutils  # noqa: F821  - defined only inside a Databricks notebook
