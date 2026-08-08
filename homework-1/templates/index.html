@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Support Desk - Lakebase</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Support Desk</h1>
+    <p class="subtitle">Tickets and messages stored in Databricks Lakebase.</p>
+    <div class="stats" id="stats"></div>
+  </header>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <div class="layout">
+    <section class="panel">
+      <h2>Tickets</h2>
+      <div class="filters">
+        <div>
+          <label for="filter-status">Status</label>
+          <select id="filter-status"></select>
+        </div>
+        <div>
+          <label for="filter-priority">Priority</label>
+          <select id="filter-priority"></select>
+        </div>
+      </div>
+      <ul class="ticket-list" id="ticket-list"></ul>
+
+      <hr>
+
+      <h2>New ticket</h2>
+      <form id="new-ticket-form">
+        <label for="new-title">Title</label>
+        <input type="text" id="new-title" maxlength="200" placeholder="Short summary of the issue" required>
+        <div class="row">
+          <div>
+            <label for="new-user">Created by</label>
+            <select id="new-user"></select>
+          </div>
+          <div>
+            <label for="new-priority">Priority</label>
+            <select id="new-priority"></select>
+          </div>
+          <div>
+            <label for="new-category">Category</label>
+            <select id="new-category"></select>
+          </div>
+        </div>
+        <label for="new-message">First message (optional)</label>
+        <textarea id="new-message" maxlength="2000" placeholder="Describe the problem"></textarea>
+        <div class="actions">
+          <button type="submit">Create ticket</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel" id="detail-panel">
+      <h2 id="detail-title">Select a ticket</h2>
+      <div id="detail-body" class="hidden">
+        <div class="ticket-meta" id="detail-meta"></div>
+
+        <div class="row" style="margin-top:14px; align-items:flex-end;">
+          <div>
+            <label for="detail-status">Status</label>
+            <select id="detail-status"></select>
+          </div>
+          <div style="flex:0 0 auto;">
+            <button type="button" class="danger" id="delete-btn">Delete ticket</button>
+            <span id="delete-confirm" class="hidden">
+              <button type="button" class="danger" id="delete-yes">Confirm delete</button>
+              <button type="button" class="secondary" id="delete-no">Cancel</button>
+            </span>
+          </div>
+        </div>
+
+        <hr>
+
+        <h2>Messages</h2>
+        <ul class="messages" id="message-list"></ul>
+
+        <form id="new-message-form">
+          <div class="row">
+            <div>
+              <label for="message-author">Author</label>
+              <select id="message-author"></select>
+            </div>
+          </div>
+          <label for="message-text">Message</label>
+          <textarea id="message-text" maxlength="2000" placeholder="Add a reply" required></textarea>
+          <div class="actions">
+            <button type="submit">Add message</button>
+          </div>
+        </form>
+      </div>
+      <p class="empty" id="detail-empty">Pick a ticket from the list to see its messages.</p>
+    </section>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
