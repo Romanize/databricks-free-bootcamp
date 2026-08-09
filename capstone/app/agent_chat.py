@@ -66,68 +66,140 @@ def _clean(messages: list) -> list:
     return cleaned
 
 
+# Databricks serves agents behind several different request/response schemas,
+# and which one you get depends on how the agent was authored - not on anything
+# visible from here. Rather than hard-code a guess, try them in order and
+# remember the one that worked, so only the first call after a restart pays for
+# the discovery. `probe_agent_endpoint.py` prints the same answer by hand.
+REQUEST_SHAPES = ("messages", "input", "dataframe_records")
+
+_working_shape: str | None = None
+
+
+def _build(shape: str, history: list) -> dict:
+    if shape == "messages":            # chat completions / ChatAgent
+        return {"messages": history}
+    if shape == "input":               # ResponsesAgent
+        return {"input": history}
+    return {"dataframe_records": [{"messages": history}]}
+
+
+def _extract_reply(payload) -> str:
+    """
+    Pull the assistant's text out of whichever response schema came back.
+
+    Returns "" when the response parsed fine but held no text - the caller
+    treats that as an error, because an empty answer in a chat tab is a bug,
+    not a reply.
+    """
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload.strip()
+    if not isinstance(payload, dict):
+        return ""
+
+    # chat completions: {"choices": [{"message": {"content": ...}}]}
+    for choice in payload.get("choices") or []:
+        text = ((choice or {}).get("message") or {}).get("content")
+        if text:
+            return text.strip()
+
+    # ChatAgent: {"messages": [{"role": "assistant", "content": ...}]}
+    for message in reversed(payload.get("messages") or []):
+        if (message or {}).get("role") == "assistant" and message.get("content"):
+            return str(message["content"]).strip()
+
+    # ResponsesAgent: {"id": "resp_...", "output": [{"type": "message",
+    #                   "content": [{"type": "output_text", "text": ...}]}]}
+    #
+    # Walked BACKWARDS on purpose. When the agent used tools, `output` holds the
+    # whole turn - function_call and function_call_output items first, the
+    # spoken answer last - so the first item with text in it is a tool argument
+    # blob, not the reply. Only `message` items are the agent talking.
+    if payload.get("output_text"):
+        return str(payload["output_text"]).strip()
+
+    for item in reversed(payload.get("output") or []):
+        item = item or {}
+        if item.get("type") not in (None, "message"):
+            continue
+        if item.get("role") not in (None, "assistant"):
+            continue
+
+        content = item.get("content")
+        if isinstance(content, str) and content:
+            return content.strip()
+        texts = [
+            str(block["text"])
+            for block in (content or [])
+            if isinstance(block, dict) and block.get("text")
+        ]
+        if texts:
+            return "\n".join(texts).strip()
+
+    # dataframe serving: {"predictions": [...]}
+    for prediction in payload.get("predictions") or []:
+        if isinstance(prediction, str) and prediction:
+            return prediction.strip()
+        if isinstance(prediction, dict):
+            nested = _extract_reply(prediction)
+            if nested:
+                return nested
+            for key in ("content", "response", "text", "result"):
+                if prediction.get(key):
+                    return str(prediction[key]).strip()
+
+    for key in ("content", "response", "text"):
+        if payload.get(key):
+            return str(payload[key]).strip()
+
+    return ""
+
+
 def ask(messages: list) -> dict:
     """
     Forward a conversation to the agent and return its reply.
 
     `messages` is the running [{role, content}] history from the browser.
     """
+    global _working_shape
+
     if not is_configured():
         raise ChatError(status()["message"])
 
     history = _clean(messages)
 
-    try:
-        from databricks.sdk import WorkspaceClient
+    from databricks.sdk import WorkspaceClient
 
-        response = WorkspaceClient().serving_endpoints.query(
-            name=ENDPOINT,
-            input=history,
-        )
-    except Exception as err:
-        logger.exception("Agent endpoint %s failed", ENDPOINT)
-        raise ChatError(
-            f"Could not reach the agent endpoint {ENDPOINT!r}: {err}"
-        ) from err
+    client = WorkspaceClient().api_client
+    path = f"/serving-endpoints/{ENDPOINT}/invocations"
+    shapes = [_working_shape] if _working_shape else list(REQUEST_SHAPES)
+    failures = []
 
-    # Parse the agent response - try multiple formats
-    reply = None
-    
-    # Format 1: Standard chat completion format (choices)
-    choices = getattr(response, "choices", None)
-    if choices and isinstance(choices, list) and len(choices) > 0:
-        message = getattr(choices[0], "message", None)
-        if message:
-            reply = getattr(message, "content", "") or ""
-    
-    # Format 2: Data array format
-    if not reply:
-        data = getattr(response, "data", None)
-        if data and isinstance(data, list) and len(data) > 0:
-            item = data[0]
-            if isinstance(item, dict):
-                reply = item.get("content", "") or item.get("response", "")
-            else:
-                reply = str(item)
-    
-    # Format 3: Predictions format
-    if not reply:
-        predictions = getattr(response, "predictions", None)
-        if predictions and isinstance(predictions, list) and len(predictions) > 0:
-            item = predictions[0]
-            if isinstance(item, dict):
-                reply = item.get("content", "") or item.get("response", "")
-            else:
-                reply = str(item)
-    
-    if not reply:
-        response_id = getattr(response, "id", "unknown")
-        raise ChatError(
-            f"The agent endpoint responded (ID: {response_id}) but returned no content. "
-            f"The endpoint may not be fully deployed or configured correctly."
-        )
+    for shape in shapes:
+        try:
+            response = client.do("POST", path, body=_build(shape, history))
+        except Exception as err:
+            # A permission or missing-endpoint failure will fail every shape
+            # identically, so keep going and report them all together below.
+            logger.warning("Agent endpoint %s rejected the %r shape: %s", ENDPOINT, shape, err)
+            failures.append(f"{shape}: {err}")
+            _working_shape = None
+            continue
 
-    return {
-        "reply": reply,
-        "endpoint": ENDPOINT,
-    }
+        reply = _extract_reply(response)
+        if reply:
+            if _working_shape != shape:
+                logger.info("Agent endpoint %s speaks the %r shape", ENDPOINT, shape)
+                _working_shape = shape
+            return {"reply": reply, "endpoint": ENDPOINT, "shape": shape}
+
+        failures.append(f"{shape}: accepted the request but returned no text")
+        _working_shape = None
+
+    logger.error("Agent endpoint %s failed every request shape", ENDPOINT)
+    raise ChatError(
+        f"Could not get a reply from the agent endpoint {ENDPOINT!r}. "
+        + " | ".join(failures)
+    )
