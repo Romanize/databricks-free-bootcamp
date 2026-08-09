@@ -82,7 +82,7 @@ def ask(messages: list) -> dict:
 
         response = WorkspaceClient().serving_endpoints.query(
             name=ENDPOINT,
-            dataframe_records=[{"messages": history}],
+            input=history,
         )
     except Exception as err:
         logger.exception("Agent endpoint %s failed", ENDPOINT)
@@ -90,20 +90,42 @@ def ask(messages: list) -> dict:
             f"Could not reach the agent endpoint {ENDPOINT!r}: {err}"
         ) from err
 
-    # Agent Bricks endpoints return predictions in dataframe format
-    predictions = getattr(response, "predictions", None)
-    if not predictions or not isinstance(predictions, list) or len(predictions) == 0:
-        raise ChatError("The agent returned no reply.")
-
-    # Extract the content from the first prediction
-    reply_data = predictions[0]
-    if isinstance(reply_data, dict):
-        reply = reply_data.get("content", "") or reply_data.get("response", "")
-    else:
-        reply = str(reply_data)
+    # Parse the agent response - try multiple formats
+    reply = None
+    
+    # Format 1: Standard chat completion format (choices)
+    choices = getattr(response, "choices", None)
+    if choices and isinstance(choices, list) and len(choices) > 0:
+        message = getattr(choices[0], "message", None)
+        if message:
+            reply = getattr(message, "content", "") or ""
+    
+    # Format 2: Data array format
+    if not reply:
+        data = getattr(response, "data", None)
+        if data and isinstance(data, list) and len(data) > 0:
+            item = data[0]
+            if isinstance(item, dict):
+                reply = item.get("content", "") or item.get("response", "")
+            else:
+                reply = str(item)
+    
+    # Format 3: Predictions format
+    if not reply:
+        predictions = getattr(response, "predictions", None)
+        if predictions and isinstance(predictions, list) and len(predictions) > 0:
+            item = predictions[0]
+            if isinstance(item, dict):
+                reply = item.get("content", "") or item.get("response", "")
+            else:
+                reply = str(item)
     
     if not reply:
-        raise ChatError("The agent returned an empty reply.")
+        response_id = getattr(response, "id", "unknown")
+        raise ChatError(
+            f"The agent endpoint responded (ID: {response_id}) but returned no content. "
+            f"The endpoint may not be fully deployed or configured correctly."
+        )
 
     return {
         "reply": reply,
