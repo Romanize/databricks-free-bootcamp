@@ -850,6 +850,11 @@ document.getElementById("trade-form").addEventListener("submit", async (event) =
 
 // --------------------------------------------------------------------- chat
 
+const autoApprove = document.getElementById("chat-auto-approve");
+autoApprove.addEventListener("change", () => {
+  localStorage.setItem("capstone-auto-approve", autoApprove.checked ? "1" : "0");
+});
+
 async function loadChat() {
   const status = await api("/api/chat/status");
   const box = document.getElementById("chat-status");
@@ -857,6 +862,12 @@ async function loadChat() {
     ? `<p class="muted">Connected to <code>${escapeHtml(status.endpoint)}</code>.</p>`
     : `<p class="muted">${escapeHtml(status.message)}</p>`;
   document.getElementById("chat-input").disabled = !status.configured;
+
+  // The server supplies the starting position (CAPSTONE_CHAT_AUTO_APPROVE);
+  // once the user has touched the box, their choice wins and is remembered
+  // across reloads, so it does not have to be re-ticked every visit.
+  const stored = localStorage.getItem("capstone-auto-approve");
+  autoApprove.checked = stored === null ? Boolean(status.auto_approve) : stored === "1";
 
   document.getElementById("chat-suggestions").innerHTML = status.configured
     ? CHAT_SUGGESTIONS.map(
@@ -875,11 +886,11 @@ document.getElementById("chat-suggestions").addEventListener("click", (event) =>
 // Reads the SSE response from /api/chat/stream and hands each event to
 // `onEvent` as it lands - text deltas and tool calls both. Not EventSource:
 // that can only issue GETs, and the conversation history has to be POSTed.
-async function streamChat(messages, onEvent) {
+async function streamChat(body, onEvent) {
   const response = await fetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -930,6 +941,28 @@ function toolTrail(message) {
   return `<div class="tool-trail">${chips}</div>`;
 }
 
+// The agent asked permission to run a tool. Shown with the arguments visible,
+// because "may I run get_holdings_breakdown?" is not a decision anyone can make
+// without seeing what it was about to be called with.
+function approvalCard(message) {
+  if (!message.approval) return "";
+  const lines = message.approval.requests
+    .map(
+      (request) =>
+        `<div><code>${escapeHtml(request.name || "tool")}</code>
+         <span class="muted">${escapeHtml(request.arguments || "")}</span></div>`,
+    )
+    .join("");
+  if (message.approval.decided) {
+    return `<div class="approval">${lines}<p class="muted">${escapeHtml(message.approval.decided)}</p></div>`;
+  }
+  return `<div class="approval"><p>The agent wants to run:</p>${lines}
+    <div class="chips">
+      <button type="button" class="chip" data-approve="yes">Accept</button>
+      <button type="button" class="chip" data-approve="no">Reject</button>
+    </div></div>`;
+}
+
 function renderChat() {
   const log = document.getElementById("chat-log");
   log.innerHTML = chatHistory
@@ -937,29 +970,26 @@ function renderChat() {
       (message) =>
         `<div class="message ${message.role}"><span class="who">${message.role}</span>
          ${toolTrail(message)}
-         <div>${escapeHtml(message.content)}${message.streaming ? '<span class="cursor">\u258d</span>' : ""}</div></div>`,
+         <div>${escapeHtml(message.content)}${message.streaming ? '<span class="cursor">\u258d</span>' : ""}</div>
+         ${approvalCard(message)}</div>`,
     )
     .join("");
   log.scrollTop = log.scrollHeight;
 }
 
-document.getElementById("chat-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const input = document.getElementById("chat-input");
-  const text = input.value.trim();
-  if (!text) return;
-
-  chatHistory.push({ role: "user", content: text });
-  input.value = "";
+// One agent turn, whether it starts from a question or resumes a paused one.
+async function runChat(body) {
   const thinking = { role: "assistant", content: "…", tools: [] };
   chatHistory.push(thinking);
   renderChat();
 
   try {
-    await streamChat(
-      chatHistory.filter((m) => m !== thinking),
-      (event) => {
-        if (event.type === "tool") {
+    await streamChat(body, (event) => {
+        if (event.type === "approval") {
+          // The turn stops here until the user decides. `state` is the agent's
+          // paused conversation, kept client-side and handed straight back.
+          thinking.approval = { requests: event.requests, state: event.state };
+        } else if (event.type === "tool") {
           // Matched on the call id so the result frame ticks off the call that
           // started it instead of adding a second chip.
           const existing = thinking.tools.find((t) => t.id === event.id);
@@ -973,13 +1003,14 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
           return;
         }
         renderChat();
-      },
-    );
+    });
     delete thinking.streaming;
     // Pieces arrive with their own spacing; the last one usually ends in one.
     thinking.content = thinking.content.trim();
     if (!thinking.content || thinking.content === "…") {
-      thinking.content = "(the agent returned an empty reply)";
+      // A turn that only asked permission has no answer in it yet, and saying
+      // "empty reply" over an approval card would be nonsense.
+      thinking.content = thinking.approval ? "" : "(the agent returned an empty reply)";
     }
   } catch (err) {
     // Drop the placeholder rather than leaving a fake turn in the history that
@@ -990,6 +1021,39 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
   renderChat();
   // The agent may have queued a proposal or written a plan during that turn.
   Promise.all([loadTradeQueue(), loadStats()]).catch(() => {});
+}
+
+document.getElementById("chat-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = document.getElementById("chat-input");
+  const text = input.value.trim();
+  if (!text) return;
+
+  chatHistory.push({ role: "user", content: text });
+  input.value = "";
+  runChat({ messages: chatHistory.filter((m) => m.content), auto_approve: autoApprove.checked });
+});
+
+// Accept / Reject on an approval card. Delegated, because renderChat() rebuilds
+// the whole log and any listener bound to a button would be thrown away with it.
+document.getElementById("chat-log").addEventListener("click", (event) => {
+  const choice = event.target.dataset.approve;
+  if (!choice) return;
+  const message = chatHistory.find((m) => m.approval && !m.approval.decided);
+  if (!message) return;
+
+  const approve = choice === "yes";
+  message.approval.decided = approve ? "Approved." : "Rejected - the agent was told no.";
+  renderChat();
+  // Rejection is sent too: the agent needs to hear the answer to continue and
+  // say it could not look that up, rather than being left hanging.
+  runChat({
+    resume: {
+      items: message.approval.state.items,
+      approvals: message.approval.requests.map((request) => ({ id: request.id, approve })),
+    },
+    auto_approve: autoApprove.checked,
+  });
 });
 
 document.getElementById("chat-clear").addEventListener("click", () => {

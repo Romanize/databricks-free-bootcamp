@@ -839,11 +839,20 @@ def chat_stream():
     raised *inside* the generator are turned into an SSE `error` event by hand:
     Flask's error handlers cannot rescue a response that is already in flight.
     """
-    messages = _chat_messages()
+    # A `resume` body carries a paused turn back: the agent asked to run a tool,
+    # the user clicked Accept or Reject, and this picks that same turn back up.
+    payload = request.get_json(silent=True) or {}
+    resume = payload.get("resume")
+    kwargs = {"resume": resume} if resume else {"messages": _chat_messages()}
+
+    # Absent (or not a boolean) leaves the decision to CAPSTONE_AUTO_APPROVE.
+    choice = payload.get("auto_approve")
+    if isinstance(choice, bool):
+        kwargs["auto_approve"] = choice
 
     def events():
         try:
-            for event in agent_chat.stream(messages):
+            for event in agent_chat.stream(**kwargs):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as err:  # noqa: BLE001 - the client needs to hear about all of them
             logger.exception("Chat stream failed")

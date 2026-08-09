@@ -37,6 +37,18 @@ env:
   # default HTTP timeout is shorter than a tool-using turn.
   - name: CAPSTONE_CHAT_TIMEOUT
     value: "120"
+  # A tool behind the MCP server is not run on the agent's say-so: the turn
+  # stops and asks. This is the STARTING position of the chat tab's
+  # "Auto-approve tools" checkbox, which the user can flip at any time without
+  # a redeploy. "0" shows Accept / Reject on every tool call; "1" answers yes
+  # for them - safe here (execute_trade still needs the user's confirmation
+  # key) but tools then run without being announced first.
+  - name: CAPSTONE_CHAT_AUTO_APPROVE
+    value: "0"
+  # How many times one question may come back asking to run more tools. The
+  # agent calls tools one at a time, so a thorough answer needs several rounds.
+  - name: CAPSTONE_CHAT_TOOL_ROUNDS
+    value: "8"
 
   # How many days before the "time for a new report" banner appears.
   - name: REPORT_STALE_DAYS

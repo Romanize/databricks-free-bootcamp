@@ -362,15 +362,44 @@ schema (default `main.capstone_analytics`, a widget).
   and later debugging a couple of hours which is actually the expected input/output and
   streaming vs block to make it work in the app client.
 
-  Two things made that slow to see. `serving_endpoints.query()` deserializes into a
+  Three traps, each hiding the next. `serving_endpoints.query()` deserializes into a
   dataclass with no `output` field, so a ResponsesAgent's whole answer is dropped in
   transit and you are left holding a response id and three empty lists — it looks
-  exactly like an endpoint returning nothing. And the endpoint answers a stream, so
+  exactly like an endpoint returning nothing. The endpoint then answers a _stream_, so
   parsing the body as one JSON document fails at character 0, which reads like a
-  network error rather than a format mismatch. `agent_chat.py` now posts to
-  `/serving-endpoints/<name>/invocations` directly, tries `input` first and keeps
-  `messages`/`dataframe_records` as fallbacks, and understands both a whole-document
-  reply and a stream.
+  network error rather than a format mismatch. And the endpoint labels an SSE **error**
+  stream `application/json`, so the agent's own explanation of what was wrong was being
+  reported as "the body was not JSON".
+
+  `agent_chat.py` now posts to `/serving-endpoints/<name>/invocations` directly, sends
+  only `input`, detects a stream by its shape rather than its Content-Type, and
+  surfaces an agent-reported failure verbatim instead of retrying it.
+
+- **Tools were being requested and never run.** The hardest one to see, because
+  nothing failed: the chat tab answered "I'll check your current holdings for you."
+  and stopped, the tracing table stayed empty, and the same question worked in the
+  Playground.
+
+  A tool reached through a registered MCP server is not run on the agent's say-so. The
+  turn ends with an `mcp_approval_request` item — _may I run `get_holdings_breakdown`
+  with these arguments?_ — and nothing happens until the caller answers. The Playground
+  answers it for you. This app was reading that turn, finding text in it, and treating
+  it as the finished reply.
+
+  So `stream()` is a loop, not a request: it emits an `approval` event carrying the
+  tool, its arguments and the paused conversation; the chat tab shows Accept / Reject;
+  the decision goes back and the same turn continues. The paused state travels through
+  the browser rather than sitting in server memory, because a Databricks App can restart
+  or run more than one worker.
+
+  An **Auto-approve tools** checkbox sits next to the chat box. Ticked, the approval is
+  answered server-side and never reaches the browser — no card, no click, the agent goes
+  straight through to the MCP server — and the answer arrives in one turn. The choice
+  rides on each request rather than being read from the environment, so it takes effect
+  immediately; `CAPSTONE_CHAT_AUTO_APPROVE` in `app.yaml` only sets where the box starts.
+  Auto-approving is defensible here because `execute_trade` is still gated by a
+  single-use key the user alone can mint on the Trades tab — the human stays in the loop
+  by that key, not by this checkbox.
 
 ## Known limitations / what I'd do next
 

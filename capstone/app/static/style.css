@@ -178,22 +178,31 @@ button.chip { cursor: pointer; font: inherit; font-size: 0.85rem; }
   50% { opacity: 0; }
 }
 
-/* The tools the agent called for one answer. */
-.tool-trail {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-bottom: 6px;
-}
+/* ------------------------------------------------- agent tool activity */
+/* Same translucent-accent idiom as .badge: readable in both schemes without
+   naming a single text colour. */
+
+.tool-trail { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 0.4rem; }
 .tool {
-  font-size: 11px;
-  font-family: ui-monospace, monospace;
-  padding: 1px 6px;
-  border-radius: 10px;
-  background: #eef2f7;
-  color: #55606d;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  background: rgba(128, 128, 128, 0.2);
+  opacity: 0.8;
 }
-.tool.running {
-  color: #8a6d1f;
-  background: #fdf3d8;
+.tool.running { background: rgba(200, 150, 40, 0.25); }
+
+/* The agent asking permission to run a tool. */
+.approval {
+  border: 1px solid rgba(200, 150, 40, 0.6);
+  background: rgba(200, 150, 40, 0.12);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
 }
+.approval p { margin: 0 0 0.4rem; }
+.approval div { margin-bottom: 0.4rem; }
+.approval code { font-size: 0.8rem; }
+.approval .chip { cursor: pointer; margin-right: 0.3rem; }

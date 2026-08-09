@@ -253,6 +253,11 @@
       <input name="message" id="chat-input" placeholder="Ask about your net worth, news or plan&hellip;" autocomplete="off">
       <button type="submit">Send</button>
       <button type="button" id="chat-clear">Clear</button>
+      <!-- Tools behind the MCP server ask permission before they run. Ticking
+           this answers yes for you, so the agent goes straight through. -->
+      <label class="muted" for="chat-auto-approve">
+        <input type="checkbox" id="chat-auto-approve"> Auto-approve tools
+      </label>
     </form>
     <p class="muted">
       The agent reads your portfolio through the MCP server. It can set up your investment
