@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Net Worth Tracker</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Net Worth Tracker</h1>
+    <p>Holdings, news sentiment and an investment plan, with an agent that can read all three.
+       All values are USD.</p>
+  </header>
+
+  <!-- Shown when the latest report is older than REPORT_STALE_DAYS. -->
+  <div id="overdue" class="banner" hidden></div>
+  <div id="error" class="error" hidden></div>
+
+  <section id="stats" class="stats"></section>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="overview">Overview</button>
+    <button class="tab" data-tab="report">New report</button>
+    <button class="tab" data-tab="holdings">Holdings</button>
+    <button class="tab" data-tab="news">News &amp; Watchlist</button>
+    <button class="tab" data-tab="plan">Plan</button>
+    <button class="tab" data-tab="trades">Trades</button>
+    <button class="tab" data-tab="chat">Chat</button>
+  </nav>
+
+  <!-- ============================================================ OVERVIEW -->
+  <section class="panel active" id="tab-overview">
+    <div class="row">
+      <span id="report-meta" class="muted"></span>
+      <button id="revalue" type="button">Re-value now (not saved)</button>
+    </div>
+    <div id="live-valuation" class="summary"></div>
+
+    <div class="chart-grid">
+      <figure>
+        <figcaption>
+          Net worth over time
+          <span class="muted">
+            <label><input type="radio" name="granularity" value="monthly" checked> monthly</label>
+            <label><input type="radio" name="granularity" value="daily"> every report</label>
+          </span>
+        </figcaption>
+        <canvas id="chart-networth"></canvas>
+      </figure>
+      <figure>
+        <figcaption>Distribution by type <span class="muted">latest report</span></figcaption>
+        <canvas id="chart-distribution"></canvas>
+      </figure>
+    </div>
+
+    <figure>
+      <figcaption>Value by holding <span class="muted">latest report</span></figcaption>
+      <canvas id="chart-holdings"></canvas>
+    </figure>
+
+    <h3>Sentiment on what you watch and own <span class="muted">last 14 days</span></h3>
+    <div id="highlights" class="highlights"></div>
+
+    <h3>Latest report</h3>
+    <table>
+      <thead>
+        <tr><th>Holding</th><th>Type</th><th>Symbol</th><th class="num">Qty</th>
+            <th class="num">Price</th><th class="num">Value</th><th>Priced from</th></tr>
+      </thead>
+      <tbody id="report-lines"><tr><td colspan="7">Loading&hellip;</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- ========================================================== NEW REPORT -->
+  <section class="panel" id="tab-report">
+    <p class="muted">
+      A report is a snapshot of what everything was worth on one day. Quantities come from
+      Alpaca where it knows them and from your last report otherwise; prices are live.
+      <strong>Bank, cash and wallet balances are carried forward for you to correct</strong> &mdash;
+      the app has no way to read them. Everything below is editable, and there is at most
+      one report per day.
+    </p>
+
+    <div class="row">
+      <label for="report-date">Report date</label>
+      <input type="date" id="report-date">
+      <button id="load-draft" type="button">Load / reload draft</button>
+      <span id="draft-meta" class="muted"></span>
+    </div>
+
+    <div id="draft-warnings" class="banner" hidden></div>
+
+    <table>
+      <thead>
+        <tr><th>Holding</th><th>Symbol</th><th class="num">Quantity</th><th class="num">Price</th>
+            <th class="num">Value</th><th>Source</th><th>Note</th></tr>
+      </thead>
+      <tbody id="draft-rows"><tr><td colspan="7" class="muted">Click "Load draft" to start.</td></tr></tbody>
+      <tfoot>
+        <tr><th colspan="4" class="num">Total</th><th class="num" id="draft-total">-</th><th colspan="2"></th></tr>
+      </tfoot>
+    </table>
+
+    <div class="row">
+      <button id="submit-report" type="button" class="primary" disabled>Submit report</button>
+      <span class="muted">Submitting replaces any existing report for that date.</span>
+    </div>
+  </section>
+
+  <!-- ============================================================ HOLDINGS -->
+  <section class="panel" id="tab-holdings">
+    <form id="holding-form" class="form">
+      <input name="alias" placeholder="Alias (e.g. Apple, Emergency fund)" required>
+      <select name="holding_type" id="holding-type">
+        <option value="ticker">ticker</option>
+        <option value="crypto">crypto</option>
+        <option value="cash">cash</option>
+        <option value="bank">bank</option>
+        <option value="wallet">wallet</option>
+      </select>
+      <input name="symbol" id="holding-symbol" placeholder="Symbol (AAPL, BTC/USD)">
+      <input name="institution" placeholder="Institution (optional)">
+      <button type="submit">Add holding</button>
+    </form>
+    <p class="muted">
+      Holdings are reference only &mdash; what exists and what it is called. Quantities and
+      values belong to a report, so add the thing here and give it a number when you
+      submit your next report.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Alias</th><th>Type</th><th>Symbol</th><th>Institution</th>
+            <th class="num">Last value</th><th>As of</th><th></th></tr>
+      </thead>
+      <tbody id="holdings-rows"><tr><td colspan="7">Loading&hellip;</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- ================================================================ NEWS -->
+  <section class="panel" id="tab-news">
+    <h3>Watchlist</h3>
+    <form id="watchlist-form" class="form">
+      <input name="symbol" placeholder="Ticker (NVDA)" required>
+      <input name="reason" placeholder="Why are you watching it?">
+      <button type="submit">Watch</button>
+    </form>
+    <div id="watchlist-rows" class="chips"></div>
+    <p class="muted">
+      News is ingested every 2 hours for the watchlist plus everything you hold.
+      Adding a ticker here starts collection on the next run.
+    </p>
+
+    <h3>Search the news index</h3>
+    <form id="search-form" class="form">
+      <input name="query" placeholder="e.g. why did margins compress?" required>
+      <input name="symbol" placeholder="Ticker (optional)">
+      <select name="top_k">
+        <option value="5">5 results</option>
+        <option value="10">10 results</option>
+        <option value="20">20 results</option>
+      </select>
+      <button type="submit">Search</button>
+    </form>
+    <div id="search-results"></div>
+
+    <h3>Sentiment over time</h3>
+    <form id="sentiment-form" class="form">
+      <input name="symbol" placeholder="Ticker (AAPL)" required>
+      <button type="submit">Plot</button>
+    </form>
+    <figure><canvas id="chart-sentiment"></canvas></figure>
+
+    <h3>Stored articles</h3>
+    <div class="row">
+      <button id="sync-news" type="button">Fetch news for one ticker now</button>
+      <button id="embed-news" type="button">Embed pending articles</button>
+      <span class="muted">Bulk ingestion is the 2-hourly job; these are for demos.</span>
+    </div>
+    <table>
+      <thead><tr><th>Published</th><th>Title</th><th>Tickers</th><th>Publisher</th><th class="num">Chunks</th></tr></thead>
+      <tbody id="news-rows"><tr><td colspan="5">Loading&hellip;</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- ================================================================ PLAN -->
+  <section class="panel" id="tab-plan">
+    <form id="plan-form" class="form">
+      <input name="name" placeholder="Plan name" required>
+      <input name="goal_amount" type="number" step="any" placeholder="Goal ($)" required>
+      <input name="expected_annual_rate" type="number" step="any" placeholder="Annual return (0.07)" required>
+      <input name="years" type="number" min="1" max="80" placeholder="Years" required>
+      <input name="expected_inflation" type="number" step="any" placeholder="Inflation (0.03)">
+      <input name="monthly_contribution" type="number" step="any" placeholder="Monthly $">
+      <input name="annual_contribution" type="number" step="any" placeholder="Annual $">
+      <label class="check"><input type="checkbox" name="is_active" checked> active</label>
+      <button type="submit">Save plan</button>
+    </form>
+    <p class="muted">
+      Rates are decimals: 0.07 is 7%. You can also just ask the agent on the Chat tab to
+      set this up for you.
+    </p>
+
+    <table>
+      <thead><tr><th>Name</th><th class="num">Goal</th><th class="num">Return</th><th class="num">Years</th>
+                 <th class="num">Monthly</th><th>By</th><th>Active</th><th></th></tr></thead>
+      <tbody id="plan-rows"><tr><td colspan="8">Loading&hellip;</td></tr></tbody>
+    </table>
+
+    <div id="projection-summary" class="summary"></div>
+    <figure>
+      <figcaption>Projection <span class="muted">nominal vs. today's money</span></figcaption>
+      <canvas id="chart-projection"></canvas>
+    </figure>
+  </section>
+
+  <!-- ============================================================== TRADES -->
+  <section class="panel" id="tab-trades">
+    <div id="broker" class="summary"></div>
+
+    <h3>Approval queue</h3>
+    <p class="muted">
+      The agent can <em>propose</em> trades but cannot execute one on its own. Clicking
+      <strong>Accept</strong> mints a single-use confirmation key and hands it to the agent,
+      which is the only way an order reaches Alpaca. Your holdings and reports are not
+      changed by a trade &mdash; submit a new report afterwards to pick up the new position.
+    </p>
+    <table>
+      <thead><tr><th>When</th><th>Proposal</th><th>By</th><th>Rationale</th><th>Status</th><th></th></tr></thead>
+      <tbody id="trade-rows"><tr><td colspan="6">Loading&hellip;</td></tr></tbody>
+    </table>
+    <div id="trade-reply" class="summary"></div>
+
+    <h3>Propose a trade yourself</h3>
+    <form id="trade-form" class="form">
+      <input name="symbol" placeholder="Symbol" required>
+      <select name="side"><option value="buy">buy</option><option value="sell">sell</option></select>
+      <input name="quantity" type="number" step="any" min="0" placeholder="Quantity" required>
+      <select name="order_type"><option value="market">market</option><option value="limit">limit</option></select>
+      <input name="limit_price" type="number" step="any" placeholder="Limit price">
+      <input name="rationale" placeholder="Why?">
+      <button type="submit">Queue proposal</button>
+    </form>
+  </section>
+
+  <!-- ================================================================ CHAT -->
+  <section class="panel" id="tab-chat">
+    <div id="chat-status" class="summary"></div>
+    <div id="chat-suggestions" class="chips"></div>
+    <div id="chat-log" class="chat-log"></div>
+    <form id="chat-form" class="form">
+      <input name="message" id="chat-input" placeholder="Ask about your net worth, news or plan&hellip;" autocomplete="off">
+      <button type="submit">Send</button>
+      <button type="button" id="chat-clear">Clear</button>
+    </form>
+    <p class="muted">
+      The agent reads your portfolio through the MCP server. It can set up your investment
+      plan and queue trade proposals, but it cannot execute a trade without you approving
+      it on the Trades tab first.
+    </p>
+  </section>
+
+  <script src="/static/chart.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

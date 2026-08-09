@@ -1,0 +1,39 @@
+command:
+  - "python"
+  - "app.py"
+
+env:
+  # ---- Lakebase. Only the app database; tracing belongs to the other two apps.
+  - name: LAKEBASE_SECRET_SCOPE
+    value: "capstone"
+  - name: LAKEBASE_SECRET_KEY
+    value: "lakebase-url"
+
+  # ---- Embeddings: must match the model the ingestion notebook and the MCP
+  # server use. The pgvector column is VECTOR(384); a mismatch fails at query time.
+  - name: EMBEDDING_MODEL
+    value: "sentence-transformers/all-MiniLM-L6-v2"
+  - name: SENTENCE_TRANSFORMERS_HOME
+    value: "/tmp/.cache/huggingface"
+  - name: HF_HOME
+    value: "/tmp/.cache/huggingface"
+
+  # ---- Massive and Alpaca keys are NOT here. config.py reads them at runtime
+  # from the secret scope above (massive-api-key, alpaca-api-key-id,
+  # alpaca-secret-key), the same way lakebase.py reads the connection URL.
+  - name: MASSIVE_MIN_INTERVAL
+    value: "12.5"
+  # PAPER endpoint. Changing this to api.alpaca.markets makes approved trades
+  # real. This app is the only one that can submit an order at all.
+  - name: ALPACA_BASE_URL
+    value: "https://paper-api.alpaca.markets"
+
+  # ---- The Agent Bricks serving endpoint backing the Chat tab. It does not
+  # exist until the agent is deployed, so it is left blank on the first deploy:
+  # the chat tab then explains itself instead of erroring. Fill it in and redeploy.
+  - name: CAPSTONE_AGENT_ENDPOINT
+    value: ""
+
+  # How many days before the "time for a new report" banner appears.
+  - name: REPORT_STALE_DAYS
+    value: "30"

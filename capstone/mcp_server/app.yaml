@@ -1,0 +1,44 @@
+command:
+  - "python"
+  - "networth_mcp_server.py"
+
+env:
+  # ---- Lakebase: two databases, two secrets. See ../setup_secrets.py.
+  - name: LAKEBASE_SECRET_SCOPE
+    value: "capstone"
+  - name: LAKEBASE_SECRET_KEY
+    value: "lakebase-url"
+  - name: LAKEBASE_TRACING_SECRET_KEY
+    value: "lakebase-tracing-url"
+  # Set to "0" to run the MCP server with no tracing database at all. The tools
+  # work either way; only the dashboard's history depends on this.
+  - name: CAPSTONE_TRACING
+    value: "1"
+
+  # ---- Embeddings: must match the model the ingestion notebook used, because
+  # the pgvector column is VECTOR(384) and a mismatch fails at query time.
+  - name: EMBEDDING_MODEL
+    value: "sentence-transformers/all-MiniLM-L6-v2"
+  - name: SENTENCE_TRANSFORMERS_HOME
+    value: "/tmp/.cache/huggingface"
+  - name: HF_HOME
+    value: "/tmp/.cache/huggingface"
+
+  # ---- Massive: news + sentiment, and the end-of-day price fallback.
+  # The key itself is NOT here. config.py reads it at runtime from the secret
+  # scope above (key: massive-api-key), the same way lakebase.py reads the
+  # connection URLs. Nothing credential-shaped is ever committed.
+  # 12.5s between calls = 4.8/min, just under the free tier's 5/min ceiling.
+  - name: MASSIVE_MIN_INTERVAL
+    value: "12.5"
+
+  # ---- Alpaca: read-only from this app. The MCP server can propose trades but
+  # has no tool that submits one; only the Flask app does that, after approval.
+  # Keys come from the secret scope (alpaca-api-key-id, alpaca-secret-key).
+  # PAPER endpoint. Changing this to api.alpaca.markets makes orders real.
+  - name: ALPACA_BASE_URL
+    value: "https://paper-api.alpaca.markets"
+
+  # A report older than this many days makes the agent warn before quoting it.
+  - name: REPORT_STALE_DAYS
+    value: "30"

@@ -1,0 +1,11 @@
+command:
+  - "python"
+  - "app.py"
+
+env:
+  # Reads the tracing database only. It never touches the app database, so the
+  # app-database secret is deliberately not granted to this app's principal.
+  - name: LAKEBASE_SECRET_SCOPE
+    value: "capstone"
+  - name: LAKEBASE_TRACING_SECRET_KEY
+    value: "lakebase-tracing-url"

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Net Worth Agent Tracing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Net Worth Agent Tracing</h1>
+    <p>Every MCP tool call the Agent Bricks agent has made, grouped by conversation.</p>
+  </header>
+
+  <section id="stats" class="stats"></section>
+
+  <section class="controls">
+    <label for="tool">Tool</label>
+    <select id="tool">
+      <option value="">All tools</option>
+      {% for tool in tools %}<option value="{{ tool }}">{{ tool }}</option>{% endfor %}
+    </select>
+
+    <label for="status">Status</label>
+    <select id="status">
+      <option value="">Any</option>
+      <option value="success">success</option>
+      <option value="no_data">no_data</option>
+      <option value="error">error</option>
+    </select>
+
+    <label for="limit">Show</label>
+    <select id="limit">
+      <option value="25">25</option>
+      <option value="50" selected>50</option>
+      <option value="100">100</option>
+      <option value="200">200</option>
+    </select>
+
+    <button id="refresh" type="button">Refresh</button>
+    <label class="auto"><input type="checkbox" id="auto"> auto-refresh (10s)</label>
+    <span id="updated"></span>
+  </section>
+
+  <div id="error" class="error" hidden></div>
+
+  <h3>Per tool</h3>
+  <table>
+    <thead><tr><th>Tool</th><th class="num">Calls</th><th class="num">Errors</th>
+               <th class="num">No data</th><th class="num">Avg ms</th></tr></thead>
+    <tbody id="by-tool"><tr><td colspan="5">Loading&hellip;</td></tr></tbody>
+  </table>
+
+  <h3>Conversations <span class="muted">grouped by MCP session</span></h3>
+  <table>
+    <thead><tr><th>Session</th><th class="num">Calls</th><th class="num">Tools</th>
+               <th class="num">Errors</th><th>Started</th><th class="num">Duration</th></tr></thead>
+    <tbody id="by-session"><tr><td colspan="6">Loading&hellip;</td></tr></tbody>
+  </table>
+
+  <h3>Recent calls</h3>
+  <table>
+    <thead><tr><th>When</th><th>Tool</th><th>Symbol</th><th>Status</th>
+               <th>Result</th><th class="num">ms</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="6">Loading&hellip;</td></tr></tbody>
+  </table>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
