@@ -32,7 +32,7 @@ env:
   # exist until the agent is deployed, so it is left blank on the first deploy:
   # the chat tab then explains itself instead of erroring. Fill it in and redeploy.
   - name: CAPSTONE_AGENT_ENDPOINT
-    value: ""
+    value: "mas-70068bcc-endpoint"
 
   # How many days before the "time for a new report" banner appears.
   - name: REPORT_STALE_DAYS
