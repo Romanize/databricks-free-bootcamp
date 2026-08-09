@@ -33,6 +33,10 @@ env:
   # the chat tab then explains itself instead of erroring. Fill it in and redeploy.
   - name: CAPSTONE_AGENT_ENDPOINT
     value: "mas-70068bcc-endpoint"
+  # An agent that calls several MCP tools before it answers is not fast, and a
+  # default HTTP timeout is shorter than a tool-using turn.
+  - name: CAPSTONE_CHAT_TIMEOUT
+    value: "120"
 
   # How many days before the "time for a new report" banner appears.
   - name: REPORT_STALE_DAYS

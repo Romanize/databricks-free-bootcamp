@@ -15,8 +15,11 @@ Nothing here can execute a trade. The agent's only trade tool is `propose_trade`
 which queues a row for the approval queue in this same app.
 """
 
+import json
 import logging
 import os
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,9 @@ ENDPOINT = os.environ.get("CAPSTONE_AGENT_ENDPOINT", "").strip()
 # get there faster than you would expect.
 MAX_HISTORY_MESSAGES = int(os.environ.get("CAPSTONE_CHAT_HISTORY", 20))
 MAX_MESSAGE_CHARS = 4000
+
+# An agent that calls several MCP tools before answering is not fast.
+TIMEOUT = int(os.environ.get("CAPSTONE_CHAT_TIMEOUT", 120))
 
 
 class ChatError(Exception):
@@ -71,7 +77,10 @@ def _clean(messages: list) -> list:
 # visible from here. Rather than hard-code a guess, try them in order and
 # remember the one that worked, so only the first call after a restart pays for
 # the discovery. `probe_agent_endpoint.py` prints the same answer by hand.
-REQUEST_SHAPES = ("messages", "input", "dataframe_records")
+# `input` first: Agent Bricks agents are ResponsesAgents, and theirs is the
+# shape they accept. The other two stay as fallbacks so a differently-authored
+# agent still works, but the common case now costs one request, not three.
+REQUEST_SHAPES = ("input", "messages", "dataframe_records")
 
 _working_shape: str | None = None
 
@@ -157,6 +166,94 @@ def _extract_reply(payload) -> str:
     return ""
 
 
+def _parse_sse(body: str) -> dict | str:
+    """
+    Turn a Server-Sent Events stream into something `_extract_reply` can read.
+
+    A streaming Responses endpoint answers with a sequence of `data: {...}`
+    lines rather than one JSON document, which is why plain json.loads() on the
+    body fails at character 0. Two things can be recovered from it: a final
+    event carrying the whole response object (preferred - it has the same shape
+    as the non-streaming reply), or the incremental text deltas, which are
+    stitched back together as a fallback.
+    """
+    final: dict | None = None
+    deltas: list[str] = []
+
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        chunk = line[len("data:"):].strip()
+        if not chunk or chunk == "[DONE]":
+            continue
+        try:
+            event = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+
+        # A `response` object only counts as the final answer once it actually
+        # carries text. The opening `response.created` event contains one that
+        # holds nothing but an id, and accepting that would discard every delta
+        # that follows it.
+        response_obj = event.get("response")
+        if isinstance(response_obj, dict) and _extract_reply(response_obj):
+            final = response_obj
+        elif _extract_reply(event) and (
+            event.get("output") or event.get("choices") or event.get("messages")
+        ):
+            final = event
+        elif isinstance(event.get("delta"), str):
+            deltas.append(event["delta"])
+        elif isinstance(event.get("text"), str) and event.get("type", "").endswith("delta"):
+            deltas.append(event["text"])
+
+    if final is not None:
+        return final
+    return "".join(deltas)
+
+
+def _post(payload: dict) -> tuple[dict | str, str]:
+    """
+    POST to the endpoint and return (parsed body, error). Exactly one is real.
+
+    Deliberately a plain request rather than serving_endpoints.query(): that
+    helper deserializes into a fixed dataclass with no `output` field, so a
+    ResponsesAgent's entire answer is dropped on the way in and you are left
+    holding an id and three empty lists. Here nothing is discarded, and when
+    something does go wrong the status and the body are in the message.
+    """
+    from databricks.sdk import WorkspaceClient
+
+    config = WorkspaceClient().config
+    url = f"{config.host.rstrip('/')}/serving-endpoints/{ENDPOINT}/invocations"
+    headers = {"Content-Type": "application/json", **config.authenticate()}
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
+    except requests.Timeout:
+        return None, f"no response within {TIMEOUT}s"
+    except requests.RequestException as err:
+        return None, str(err)
+
+    body = (response.text or "").strip()
+    if response.status_code >= 400:
+        return None, f"HTTP {response.status_code}: {body[:400]}"
+    if not body:
+        return None, f"HTTP {response.status_code} with an empty body"
+
+    content_type = response.headers.get("Content-Type", "")
+    if "event-stream" in content_type or body.startswith("data:"):
+        return _parse_sse(body), ""
+
+    try:
+        return response.json(), ""
+    except ValueError:
+        return None, f"body was not JSON (Content-Type {content_type!r}): {body[:200]}"
+
+
 def ask(messages: list) -> dict:
     """
     Forward a conversation to the agent and return its reply.
@@ -169,33 +266,25 @@ def ask(messages: list) -> dict:
         raise ChatError(status()["message"])
 
     history = _clean(messages)
-
-    from databricks.sdk import WorkspaceClient
-
-    client = WorkspaceClient().api_client
-    path = f"/serving-endpoints/{ENDPOINT}/invocations"
     shapes = [_working_shape] if _working_shape else list(REQUEST_SHAPES)
     failures = []
 
     for shape in shapes:
-        try:
-            response = client.do("POST", path, body=_build(shape, history))
-        except Exception as err:
-            # A permission or missing-endpoint failure will fail every shape
-            # identically, so keep going and report them all together below.
-            logger.warning("Agent endpoint %s rejected the %r shape: %s", ENDPOINT, shape, err)
-            failures.append(f"{shape}: {err}")
+        body, error = _post(_build(shape, history))
+        if error:
+            logger.warning("Agent endpoint %s rejected the %r shape: %s", ENDPOINT, shape, error)
+            failures.append(f"{shape}: {error}")
             _working_shape = None
             continue
 
-        reply = _extract_reply(response)
+        reply = _extract_reply(body)
         if reply:
             if _working_shape != shape:
                 logger.info("Agent endpoint %s speaks the %r shape", ENDPOINT, shape)
                 _working_shape = shape
             return {"reply": reply, "endpoint": ENDPOINT, "shape": shape}
 
-        failures.append(f"{shape}: accepted the request but returned no text")
+        failures.append(f"{shape}: replied, but with no text in it")
         _working_shape = None
 
     logger.error("Agent endpoint %s failed every request shape", ENDPOINT)
