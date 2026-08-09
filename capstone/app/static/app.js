@@ -872,10 +872,10 @@ document.getElementById("chat-suggestions").addEventListener("click", (event) =>
   document.getElementById("chat-form").requestSubmit();
 });
 
-// Reads the SSE response from /api/chat/stream and hands each piece of text to
-// `onPiece` as it lands. Not EventSource: that can only issue GETs, and the
-// conversation history has to be POSTed.
-async function streamChat(messages, onPiece) {
+// Reads the SSE response from /api/chat/stream and hands each event to
+// `onEvent` as it lands - text deltas and tool calls both. Not EventSource:
+// that can only issue GETs, and the conversation history has to be POSTed.
+async function streamChat(messages, onEvent) {
   const response = await fetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -910,10 +910,24 @@ async function streamChat(messages, onPiece) {
       } catch {
         continue;
       }
-      if (event.type === "delta" && event.text) onPiece(event.text);
-      else if (event.type === "error") throw new Error(event.message);
+      if (event.type === "error") throw new Error(event.message);
+      else onEvent(event);
     }
   }
+}
+
+// The tools the agent used for this turn, shown above its answer. Without this
+// the whole tool loop - which is most of the wait - is invisible, and a slow
+// answer is indistinguishable from a stuck one.
+function toolTrail(message) {
+  if (!message.tools || !message.tools.length) return "";
+  const chips = message.tools
+    .map(
+      (tool) =>
+        `<span class="tool ${tool.status}">${tool.status === "done" ? "\u2713" : "\u2699"} ${escapeHtml(tool.name)}</span>`,
+    )
+    .join("");
+  return `<div class="tool-trail">${chips}</div>`;
 }
 
 function renderChat() {
@@ -922,6 +936,7 @@ function renderChat() {
     .map(
       (message) =>
         `<div class="message ${message.role}"><span class="who">${message.role}</span>
+         ${toolTrail(message)}
          <div>${escapeHtml(message.content)}${message.streaming ? '<span class="cursor">\u258d</span>' : ""}</div></div>`,
     )
     .join("");
@@ -936,17 +951,27 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
 
   chatHistory.push({ role: "user", content: text });
   input.value = "";
-  const thinking = { role: "assistant", content: "…" };
+  const thinking = { role: "assistant", content: "…", tools: [] };
   chatHistory.push(thinking);
   renderChat();
 
   try {
     await streamChat(
       chatHistory.filter((m) => m !== thinking),
-      (piece) => {
-        // First piece replaces the placeholder rather than appending to it.
-        thinking.content = thinking.streaming ? thinking.content + piece : piece;
-        thinking.streaming = true;
+      (event) => {
+        if (event.type === "tool") {
+          // Matched on the call id so the result frame ticks off the call that
+          // started it instead of adding a second chip.
+          const existing = thinking.tools.find((t) => t.id === event.id);
+          if (existing) existing.status = event.status;
+          else thinking.tools.push({ id: event.id, name: event.name, status: event.status });
+        } else if (event.type === "delta" && event.text) {
+          // First piece replaces the placeholder rather than appending to it.
+          thinking.content = thinking.streaming ? thinking.content + event.text : event.text;
+          thinking.streaming = true;
+        } else {
+          return;
+        }
         renderChat();
       },
     );

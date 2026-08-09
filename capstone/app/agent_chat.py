@@ -200,6 +200,17 @@ def _extract_reply(payload) -> str:
     return ""
 
 
+def _tools_used(payload) -> list:
+    """Tool names in a complete (non-streamed) response, in call order."""
+    if not isinstance(payload, dict):
+        return []
+    return [
+        str(item.get("name"))
+        for item in payload.get("output") or []
+        if isinstance(item, dict) and item.get("type") == "function_call" and item.get("name")
+    ]
+
+
 def _parse_sse(body: str) -> dict | str:
     """
     Turn a whole SSE body into something `_extract_reply` can read.
@@ -276,11 +287,19 @@ def ask(messages: list) -> dict:
     reply = _extract_reply(parsed)
     if not reply:
         raise ChatError("The agent replied, but with no text in it.")
-    return {"reply": reply, "endpoint": ENDPOINT}
+    return {"reply": reply, "endpoint": ENDPOINT, "tools": _tools_used(parsed)}
 
 
 def _stream_delta(event: dict) -> str:
     """Pull the incremental text out of one streamed event, if it has any."""
+    # `response.function_call_arguments.delta` carries a `delta` string too, but
+    # it is the tool's raw JSON arguments being assembled, not the agent
+    # speaking. Without this guard `{"refresh_prices": true}` is typed into the
+    # chat window one fragment at a time, in front of the actual answer.
+    kind = str(event.get("type") or "")
+    if "function_call" in kind or "arguments" in kind:
+        return ""
+
     delta = event.get("delta")
     if isinstance(delta, str):
         return delta
@@ -302,6 +321,35 @@ def _stream_delta(event: dict) -> str:
     return ""
 
 
+# A ResponsesAgent reports tool use as `output_item` frames: `function_call`
+# when it decides to call something, `function_call_output` when the result
+# comes back.
+_TOOL_KINDS = ("function_call", "function_call_output")
+
+
+def _tool_item(event: dict):
+    """
+    Recognise tool activity in a streamed event.
+
+    Returns (call_id, kind, name), or None when the frame is not about a tool.
+
+    This has to exist separately because tool frames carry NO text:
+    `_stream_delta` finds nothing in them and `_extract_reply` skips every item
+    that is not a `message`. Without this, a turn that called six tools looked
+    from the browser exactly like a turn that called none - a long silence, then
+    an answer out of nowhere.
+    """
+    item = event.get("item")
+    if not isinstance(item, dict):
+        item = event if event.get("type") in _TOOL_KINDS else None
+    if not isinstance(item, dict) or item.get("type") not in _TOOL_KINDS:
+        return None
+    # A result frame carries no name, only the call_id it belongs to, so the
+    # caller keeps the id -> name mapping from the matching call frame.
+    call_id = str(item.get("call_id") or item.get("id") or item.get("name") or "")
+    return call_id, item["type"], str(item.get("name") or "")
+
+
 def stream(messages: list):
     """
     Yield the agent's answer in pieces as it is written.
@@ -318,6 +366,7 @@ def stream(messages: list):
     history = _clean(messages)
     url, headers = _url()
     streamed_any = False
+    tool_names: dict[str, str] = {}
 
     try:
         response = requests.post(
@@ -351,10 +400,28 @@ def stream(messages: list):
                 continue
             if not isinstance(event, dict):
                 continue
+            # Turn this on when the chat tab shows no tool activity: it says
+            # whether the endpoint emits tool frames at all, or only text.
+            logger.debug("chat stream event: %s", event.get("type"))
 
             failure = _failure_in(name, event)
             if failure:
                 raise ChatError(failure)
+
+            tool = _tool_item(event)
+            if tool:
+                call_id, kind, tool_name = tool
+                if kind == "function_call":
+                    # `.added` and `.done` describe the same call; report once.
+                    if call_id not in tool_names:
+                        tool_names[call_id] = tool_name
+                        yield {"type": "tool", "id": call_id, "name": tool_name,
+                               "status": "running"}
+                else:
+                    yield {"type": "tool", "id": call_id,
+                           "name": tool_names.get(call_id) or tool_name or "tool",
+                           "status": "done"}
+                continue
 
             piece = _stream_delta(event)
             if piece:
@@ -386,5 +453,11 @@ def stream(messages: list):
             return
         logger.info("Streaming failed before any text (%s); falling back", err)
 
-    yield {"type": "delta", "text": ask(messages)["reply"]}
+    answer = ask(messages)
+    # Only if the stream itself reported none - otherwise the fallback would
+    # list the same calls a second time.
+    if not tool_names:
+        for index, used in enumerate(answer.get("tools") or []):
+            yield {"type": "tool", "id": f"blocking-{index}", "name": used, "status": "done"}
+    yield {"type": "delta", "text": answer["reply"]}
     yield {"type": "done"}

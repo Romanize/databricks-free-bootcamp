@@ -177,3 +177,23 @@ button.chip { cursor: pointer; font: inherit; font-size: 0.85rem; }
 @keyframes blink {
   50% { opacity: 0; }
 }
+
+/* The tools the agent called for one answer. */
+.tool-trail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.tool {
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #eef2f7;
+  color: #55606d;
+}
+.tool.running {
+  color: #8a6d1f;
+  background: #fdf3d8;
+}
