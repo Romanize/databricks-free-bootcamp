@@ -79,19 +79,10 @@ def ask(messages: list) -> dict:
 
     try:
         from databricks.sdk import WorkspaceClient
-        from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
         response = WorkspaceClient().serving_endpoints.query(
             name=ENDPOINT,
-            input=[
-                ChatMessage(
-                    role=ChatMessageRole.USER
-                    if message["role"] == "user"
-                    else ChatMessageRole.ASSISTANT,
-                    content=message["content"],
-                )
-                for message in history
-            ],
+            dataframe_records=[{"messages": history}],
         )
     except Exception as err:
         logger.exception("Agent endpoint %s failed", ENDPOINT)
@@ -99,12 +90,22 @@ def ask(messages: list) -> dict:
             f"Could not reach the agent endpoint {ENDPOINT!r}: {err}"
         ) from err
 
-    choices = getattr(response, "choices", None) or []
-    if not choices:
+    # Agent Bricks endpoints return predictions in dataframe format
+    predictions = getattr(response, "predictions", None)
+    if not predictions or not isinstance(predictions, list) or len(predictions) == 0:
         raise ChatError("The agent returned no reply.")
 
-    message = choices[0].message
+    # Extract the content from the first prediction
+    reply_data = predictions[0]
+    if isinstance(reply_data, dict):
+        reply = reply_data.get("content", "") or reply_data.get("response", "")
+    else:
+        reply = str(reply_data)
+    
+    if not reply:
+        raise ChatError("The agent returned an empty reply.")
+
     return {
-        "reply": getattr(message, "content", "") or "",
+        "reply": reply,
         "endpoint": ENDPOINT,
     }
