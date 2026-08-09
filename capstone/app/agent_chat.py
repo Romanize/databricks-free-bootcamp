@@ -11,6 +11,16 @@ The endpoint name is configuration, not code, because it does not exist until
 the agent has been deployed. Until CAPSTONE_AGENT_ENDPOINT is set the chat tab
 renders and explains itself instead of erroring - see `status()`.
 
+Two things about the wire format, both learned the hard way:
+
+* The request field is `input`, not `messages`. Agent Bricks agents are
+  ResponsesAgents and reject anything else outright.
+* `WorkspaceClient().serving_endpoints.query()` is not used here. It
+  deserializes into a dataclass with no `output` field, so a ResponsesAgent's
+  entire answer is dropped in transit and the caller is left holding a response
+  id and three empty lists - indistinguishable from an endpoint that returned
+  nothing. Posting to `/invocations` directly keeps the whole reply.
+
 Nothing here can execute a trade. The agent's only trade tool is `propose_trade`,
 which queues a row for the approval queue in this same app.
 """
@@ -40,7 +50,7 @@ class ChatError(Exception):
 
 
 class _NotStreamable(Exception):
-    """Internal: this endpoint will not stream, so use the blocking path."""
+    """Internal: this endpoint would not stream, so use the blocking path."""
 
 
 def is_configured() -> bool:
@@ -76,30 +86,74 @@ def _clean(messages: list) -> list:
     return cleaned
 
 
-# Databricks serves agents behind several different request/response schemas,
-# and which one you get depends on how the agent was authored - not on anything
-# visible from here. Rather than hard-code a guess, try them in order and
-# remember the one that worked, so only the first call after a restart pays for
-# the discovery. `probe_agent_endpoint.py` prints the same answer by hand.
-# `input` first: Agent Bricks agents are ResponsesAgents, and theirs is the
-# shape they accept. The other two stay as fallbacks so a differently-authored
-# agent still works, but the common case now costs one request, not three.
-REQUEST_SHAPES = ("input", "messages", "dataframe_records")
+def _url() -> tuple[str, dict]:
+    """The invocations URL and the headers to call it with."""
+    from databricks.sdk import WorkspaceClient
 
-_working_shape: str | None = None
+    config = WorkspaceClient().config
+    return (
+        f"{config.host.rstrip('/')}/serving-endpoints/{ENDPOINT}/invocations",
+        {"Content-Type": "application/json", **config.authenticate()},
+    )
 
 
-def _build(shape: str, history: list) -> dict:
-    if shape == "messages":            # chat completions / ChatAgent
-        return {"messages": history}
-    if shape == "input":               # ResponsesAgent
-        return {"input": history}
-    return {"dataframe_records": [{"messages": history}]}
+# ------------------------------------------------------------------ responses
+
+
+def _sse_events(body: str):
+    """Yield (event_name, parsed_data) for each frame of an SSE body."""
+    name = ""
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            name = ""  # a blank line ends the frame
+            continue
+        if line.startswith("event:"):
+            name = line[len("event:"):].strip()
+            continue
+        if not line.startswith("data:"):
+            continue
+        chunk = line[len("data:"):].strip()
+        if not chunk or chunk == "[DONE]":
+            continue
+        try:
+            parsed = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            yield name, parsed
+
+
+def _failure_in(name: str, event: dict) -> str:
+    """
+    The agent's own error message, if this frame carries one.
+
+    An agent that cannot reach its MCP tools still answers HTTP 200 and then
+    says so inside the stream, so this is the only place that failure is
+    visible. It has to be surfaced verbatim - "HTTP 401 registering tools" and
+    "the model is overloaded" need completely different fixes.
+    """
+    if name == "error" or event.get("error_code") or event.get("error"):
+        error = event.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error)
+        return str(event.get("message") or error or event.get("error_code"))
+    return ""
+
+
+def _looks_like_sse(body: str, content_type: str) -> bool:
+    # Content-Type is not reliable here: the endpoint labels an SSE error
+    # stream as application/json.
+    return (
+        "event-stream" in content_type
+        or body.startswith("data:")
+        or body.startswith("event:")
+    )
 
 
 def _extract_reply(payload) -> str:
     """
-    Pull the assistant's text out of whichever response schema came back.
+    Pull the assistant's text out of the response.
 
     Returns "" when the response parsed fine but held no text - the caller
     treats that as an error, because an empty answer in a chat tab is a bug,
@@ -112,27 +166,13 @@ def _extract_reply(payload) -> str:
     if not isinstance(payload, dict):
         return ""
 
-    # chat completions: {"choices": [{"message": {"content": ...}}]}
-    for choice in payload.get("choices") or []:
-        text = ((choice or {}).get("message") or {}).get("content")
-        if text:
-            return text.strip()
+    if payload.get("output_text"):
+        return str(payload["output_text"]).strip()
 
-    # ChatAgent: {"messages": [{"role": "assistant", "content": ...}]}
-    for message in reversed(payload.get("messages") or []):
-        if (message or {}).get("role") == "assistant" and message.get("content"):
-            return str(message["content"]).strip()
-
-    # ResponsesAgent: {"id": "resp_...", "output": [{"type": "message",
-    #                   "content": [{"type": "output_text", "text": ...}]}]}
-    #
     # Walked BACKWARDS on purpose. When the agent used tools, `output` holds the
     # whole turn - function_call and function_call_output items first, the
     # spoken answer last - so the first item with text in it is a tool argument
     # blob, not the reply. Only `message` items are the agent talking.
-    if payload.get("output_text"):
-        return str(payload["output_text"]).strip()
-
     for item in reversed(payload.get("output") or []):
         item = item or {}
         if item.get("type") not in (None, "message"):
@@ -151,161 +191,96 @@ def _extract_reply(payload) -> str:
         if texts:
             return "\n".join(texts).strip()
 
-    # dataframe serving: {"predictions": [...]}
-    for prediction in payload.get("predictions") or []:
-        if isinstance(prediction, str) and prediction:
-            return prediction.strip()
-        if isinstance(prediction, dict):
-            nested = _extract_reply(prediction)
-            if nested:
-                return nested
-            for key in ("content", "response", "text", "result"):
-                if prediction.get(key):
-                    return str(prediction[key]).strip()
-
-    for key in ("content", "response", "text"):
-        if payload.get(key):
-            return str(payload[key]).strip()
+    # Older chat-shaped agents, kept because they cost three lines.
+    for choice in payload.get("choices") or []:
+        text = ((choice or {}).get("message") or {}).get("content")
+        if text:
+            return text.strip()
 
     return ""
 
 
 def _parse_sse(body: str) -> dict | str:
     """
-    Turn a Server-Sent Events stream into something `_extract_reply` can read.
+    Turn a whole SSE body into something `_extract_reply` can read.
 
-    A streaming Responses endpoint answers with a sequence of `data: {...}`
-    lines rather than one JSON document, which is why plain json.loads() on the
-    body fails at character 0. Two things can be recovered from it: a final
-    event carrying the whole response object (preferred - it has the same shape
-    as the non-streaming reply), or the incremental text deltas, which are
-    stitched back together as a fallback.
+    Prefers a final event carrying the complete response object, since that has
+    the same shape as a non-streaming reply; falls back to stitching the
+    incremental text deltas back together.
     """
     final: dict | None = None
     deltas: list[str] = []
 
-    for line in body.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        chunk = line[len("data:"):].strip()
-        if not chunk or chunk == "[DONE]":
-            continue
-        try:
-            event = json.loads(chunk)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
+    for name, event in _sse_events(body):
+        failure = _failure_in(name, event)
+        if failure:
+            raise ChatError(failure)
 
         # A `response` object only counts as the final answer once it actually
-        # carries text. The opening `response.created` event contains one that
+        # carries text: the opening `response.created` event contains one that
         # holds nothing but an id, and accepting that would discard every delta
         # that follows it.
         response_obj = event.get("response")
         if isinstance(response_obj, dict) and _extract_reply(response_obj):
             final = response_obj
-        elif _extract_reply(event) and (
-            event.get("output") or event.get("choices") or event.get("messages")
-        ):
+        elif _extract_reply(event) and (event.get("output") or event.get("choices")):
             final = event
         elif isinstance(event.get("delta"), str):
             deltas.append(event["delta"])
         elif isinstance(event.get("text"), str) and event.get("type", "").endswith("delta"):
             deltas.append(event["text"])
 
-    if final is not None:
-        return final
-    return "".join(deltas)
+    return final if final is not None else "".join(deltas)
 
 
-def _post(payload: dict) -> tuple[dict | str, str]:
-    """
-    POST to the endpoint and return (parsed body, error). Exactly one is real.
-
-    Deliberately a plain request rather than serving_endpoints.query(): that
-    helper deserializes into a fixed dataclass with no `output` field, so a
-    ResponsesAgent's entire answer is dropped on the way in and you are left
-    holding an id and three empty lists. Here nothing is discarded, and when
-    something does go wrong the status and the body are in the message.
-    """
-    from databricks.sdk import WorkspaceClient
-
-    config = WorkspaceClient().config
-    url = f"{config.host.rstrip('/')}/serving-endpoints/{ENDPOINT}/invocations"
-    headers = {"Content-Type": "application/json", **config.authenticate()}
-
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
-    except requests.Timeout:
-        return None, f"no response within {TIMEOUT}s"
-    except requests.RequestException as err:
-        return None, str(err)
-
-    body = (response.text or "").strip()
-    if response.status_code >= 400:
-        return None, f"HTTP {response.status_code}: {body[:400]}"
-    if not body:
-        return None, f"HTTP {response.status_code} with an empty body"
-
-    content_type = response.headers.get("Content-Type", "")
-    if "event-stream" in content_type or body.startswith("data:"):
-        return _parse_sse(body), ""
-
-    try:
-        return response.json(), ""
-    except ValueError:
-        return None, f"body was not JSON (Content-Type {content_type!r}): {body[:200]}"
+# -------------------------------------------------------------------- calling
 
 
 def ask(messages: list) -> dict:
     """
-    Forward a conversation to the agent and return its reply.
+    Forward a conversation and wait for the whole answer.
 
-    `messages` is the running [{role, content}] history from the browser.
+    Used by the trade-approval path, which needs a complete reply rather than
+    a stream, and as the fallback when streaming is unavailable.
     """
-    global _working_shape
-
     if not is_configured():
         raise ChatError(status()["message"])
 
     history = _clean(messages)
-    shapes = [_working_shape] if _working_shape else list(REQUEST_SHAPES)
-    failures = []
+    url, headers = _url()
 
-    for shape in shapes:
-        body, error = _post(_build(shape, history))
-        if error:
-            logger.warning("Agent endpoint %s rejected the %r shape: %s", ENDPOINT, shape, error)
-            failures.append(f"{shape}: {error}")
-            _working_shape = None
-            continue
+    try:
+        response = requests.post(
+            url, headers=headers, json={"input": history}, timeout=TIMEOUT
+        )
+    except requests.Timeout:
+        raise ChatError(f"The agent did not answer within {TIMEOUT}s.") from None
+    except requests.RequestException as err:
+        raise ChatError(f"Could not reach the agent endpoint: {err}") from err
 
-        reply = _extract_reply(body)
-        if reply:
-            if _working_shape != shape:
-                logger.info("Agent endpoint %s speaks the %r shape", ENDPOINT, shape)
-                _working_shape = shape
-            return {"reply": reply, "endpoint": ENDPOINT, "shape": shape}
+    body = (response.text or "").strip()
+    content_type = response.headers.get("Content-Type", "")
 
-        failures.append(f"{shape}: replied, but with no text in it")
-        _working_shape = None
+    if _looks_like_sse(body, content_type):
+        parsed = _parse_sse(body)  # raises ChatError on an error frame
+    elif response.status_code >= 400:
+        raise ChatError(f"The agent endpoint returned HTTP {response.status_code}: {body[:400]}")
+    elif not body:
+        raise ChatError(f"The agent endpoint returned HTTP {response.status_code} with an empty body.")
+    else:
+        try:
+            parsed = response.json()
+        except ValueError:
+            raise ChatError(f"The agent endpoint did not return JSON: {body[:200]}") from None
 
-    logger.error("Agent endpoint %s failed every request shape", ENDPOINT)
-    raise ChatError(
-        f"Could not get a reply from the agent endpoint {ENDPOINT!r}. "
-        + " | ".join(failures)
-    )
-
-# ---------------------------------------------------------------- streaming
+    reply = _extract_reply(parsed)
+    if not reply:
+        raise ChatError("The agent replied, but with no text in it.")
+    return {"reply": reply, "endpoint": ENDPOINT}
 
 
 def _stream_delta(event: dict) -> str:
     """Pull the incremental text out of one streamed event, if it has any."""
-    if not isinstance(event, dict):
-        return ""
-
-    # Responses API: {"type": "response.output_text.delta", "delta": "..."}
     delta = event.get("delta")
     if isinstance(delta, str):
         return delta
@@ -316,7 +291,6 @@ def _stream_delta(event: dict) -> str:
             if isinstance(block, dict) and isinstance(block.get("text"), str):
                 return block["text"]
 
-    # Chat completions: {"choices": [{"delta": {"content": "..."}}]}
     for choice in event.get("choices") or []:
         piece = ((choice or {}).get("delta") or {}).get("content")
         if isinstance(piece, str):
@@ -334,46 +308,38 @@ def stream(messages: list):
 
     Emits {"type": "delta", "text": ...} repeatedly, then {"type": "done"}.
 
-    Falls back to the blocking `ask()` and emits the whole answer as one delta
-    whenever streaming is not available - a request the endpoint refuses, a
-    stream that carries no text, or a transport error before any text arrived.
-    Once text HAS been shown, a mid-stream failure is reported as an error
-    rather than retried, because replaying would duplicate what the user is
-    already reading.
+    Falls back to the blocking `ask()` when streaming is unavailable. An error
+    the agent reports about itself is NOT retried - it would fail identically
+    and only delay the message that explains it.
     """
     if not is_configured():
         raise ChatError(status()["message"])
 
     history = _clean(messages)
+    url, headers = _url()
     streamed_any = False
 
     try:
-        from databricks.sdk import WorkspaceClient
-
-        config = WorkspaceClient().config
-        url = f"{config.host.rstrip('/')}/serving-endpoints/{ENDPOINT}/invocations"
         response = requests.post(
             url,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-                **config.authenticate(),
-            },
+            headers={**headers, "Accept": "text/event-stream"},
             json={"input": history, "stream": True},
             stream=True,
             timeout=TIMEOUT,
         )
 
         if response.status_code >= 400:
-            detail = (response.text or "")[:200]
-            logger.info("Endpoint %s refused to stream (%s): %s",
-                        ENDPOINT, response.status_code, detail)
-            raise _NotStreamable(f"HTTP {response.status_code}")
+            raise _NotStreamable(f"HTTP {response.status_code}: {(response.text or '')[:200]}")
 
+        name = ""
         for raw in response.iter_lines(decode_unicode=True):
-            if not raw:
+            line = (raw or "").strip()
+            if not line:
+                name = ""
                 continue
-            line = raw.strip()
+            if line.startswith("event:"):
+                name = line[len("event:"):].strip()
+                continue
             if not line.startswith("data:"):
                 continue
             chunk = line[len("data:"):].strip()
@@ -383,6 +349,12 @@ def stream(messages: list):
                 event = json.loads(chunk)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(event, dict):
+                continue
+
+            failure = _failure_in(name, event)
+            if failure:
+                raise ChatError(failure)
 
             piece = _stream_delta(event)
             if piece:
@@ -403,6 +375,8 @@ def stream(messages: list):
         yield {"type": "done"}
         return
 
+    except ChatError:
+        raise  # the agent's own words; nothing to retry and nothing to add
     except _NotStreamable as err:
         logger.info("Falling back to a blocking call: %s", err)
     except Exception as err:
@@ -412,6 +386,5 @@ def stream(messages: list):
             return
         logger.info("Streaming failed before any text (%s); falling back", err)
 
-    # Fallback: one blocking call, delivered as a single delta.
     yield {"type": "delta", "text": ask(messages)["reply"]}
     yield {"type": "done"}
