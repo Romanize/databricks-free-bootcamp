@@ -80,7 +80,14 @@ def main() -> None:
     parser.add_argument(
         "--grant-only", action="store_true", help="skip the values, just grant access"
     )
-    args = parser.parse_args()
+    # In a notebook environment, parse an empty list to avoid argparse errors
+    # from notebook kernel arguments. To use flags like --only or --grant-only,
+    # run this script from a terminal instead.
+    try:
+        args = parser.parse_args()
+    except SystemExit:
+        # Fallback to defaults when running in a notebook
+        args = parser.parse_args([])
 
     w = WorkspaceClient()
 

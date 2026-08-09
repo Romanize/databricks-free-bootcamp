@@ -83,7 +83,7 @@ def ask(messages: list) -> dict:
 
         response = WorkspaceClient().serving_endpoints.query(
             name=ENDPOINT,
-            messages=[
+            input=[
                 ChatMessage(
                     role=ChatMessageRole.USER
                     if message["role"] == "user"
