@@ -2,8 +2,9 @@
 Chunking + embedding for ticker news articles.
 
 Shared by the MCP server (which embeds the incoming search query), the Flask app
-(which can trigger an embed run from the UI) and notebooks/ingest_news_embeddings.py
-(the every-2-hours job), so all three always use the same model, the same
+(which embeds the search query behind the news search box) and
+notebooks/ingest_news_embeddings.py (the every-2-hours job, the only thing that
+writes embeddings), so all three always use the same model, the same
 dimensionality and the same chunking rules.
 
 Carried over from homework 2 with two changes:

@@ -18,14 +18,13 @@ the Agent Bricks agent.
     POST   /api/reports                 submit a report
     GET    /api/reports/live            re-value now without saving
     GET    /api/charts/<name>           series for each chart
-    GET    /api/news                    stored articles
+    GET    /api/news                    stored articles, paginated
     POST   /api/news/search             semantic search over the news embeddings
     POST   /api/news/sync               fetch one ticker's news now (slow: rate limited)
-    POST   /api/news/embed              embed whatever is pending
     GET    /api/sentiment/highlights    the sentiment strip
     GET    /api/trades                  the approval queue
     POST   /api/trades                  propose one by hand
-    POST   /api/trades/<id>/approve     ** mints the confirmation key, hands it to the agent **
+    POST   /api/trades/<id>/approve     ** mints the confirmation key, returns the chat message **
     POST   /api/trades/<id>/reject
     GET    /api/broker                  Alpaca account and positions
     GET    /api/chat/status             whether the agent endpoint is configured
@@ -586,9 +585,27 @@ def chart_sentiment():
 
 @app.route("/api/news")
 def list_news():
+    """
+    One page of stored articles, newest first.
+
+    The table grows without bound - the 2-hourly job adds every article Massive
+    returns for every tracked symbol - so this pages rather than truncating.
+    `total` is what the pager needs to know whether there is a next page and is
+    counted under the same filter as the rows.
+    """
     symbol = (request.args.get("symbol") or "").strip().upper() or None
+    limit = clamp_int(request.args.get("limit"), 20, 1, 100)
+    offset = clamp_int(request.args.get("offset"), 0, 0, 100_000)
     return jsonify(
-        serialize(schema.recent_articles(symbol, clamp_int(request.args.get("limit"), 20, 1, 100)))
+        serialize(
+            {
+                "articles": schema.recent_articles(symbol, limit, offset),
+                "total": schema.count_articles(symbol),
+                "symbol": symbol,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
     )
 
 
@@ -644,16 +661,11 @@ def sync_news():
             "articles": written,
             "sentiments": scored,
             "pending_embeddings": embeddings.count_pending(),
-            "note": f"Fetched {written} articles. Embed them to make them searchable.",
+            "note": (
+                f"Fetched {written} articles. The 2-hourly ingestion job embeds them; "
+                "until it runs they are stored but not searchable."
+            ),
         }
-    )
-
-
-@app.route("/api/news/embed", methods=["POST"])
-def embed_news():
-    """Embed pending articles. Same code path as the notebook job."""
-    return jsonify(
-        serialize(embeddings.embed_pending(limit=clamp_int(payload().get("limit"), 200, 1, 2000)))
     )
 
 
@@ -734,15 +746,20 @@ def create_trade():
 @app.route("/api/trades/<int:trade_id>/approve", methods=["POST"])
 def approve_trade(trade_id: int):
     """
-    Accept a proposal: mint its confirmation key and hand it to the agent.
+    Accept a proposal: mint its confirmation key and return the message that
+    redeems it, which the browser sends on the Chat tab.
 
     **This route is the human-in-the-loop boundary.** The key does not exist
     until a person hits this endpoint, is stored only as a hash, and is spent the
     first time the agent redeems it. The agent has no tool that can reach here.
 
-    The key is forwarded to the agent in the same request. It is never returned
-    to the browser: the page has no use for it, and putting a live credential in
-    a JSON response is how it ends up in a log or a screenshot.
+    The handoff runs through the normal chat: the key travels back to the page
+    inside `chat_message`, and the page posts it as an ordinary turn. That puts
+    the whole exchange - the instruction, the tool call, the fill - in the
+    conversation the user is looking at, instead of a side channel whose only
+    visible trace was a one-line summary. The key stays single-use and
+    short-lived (KEY_TTL_MINUTES), so the copy in the transcript is spent by the
+    time anyone reads it.
     """
     # Checked BEFORE minting: an unusable key is still a live credential, and
     # the proposal would be left armed with no way to redeem or un-approve it
@@ -757,29 +774,21 @@ def approve_trade(trade_id: int):
     approved, key = trading.issue_key(trade_id)
 
     instruction = (
-        f"The user approved trade proposal #{trade_id} "
+        f"I approved trade proposal #{trade_id} "
         f"({approved['side']} {approved['quantity']} {approved['symbol']}). "
         f"Call execute_trade with proposal_id={trade_id} and "
-        f"confirmation_key={key} now, then tell them what happened."
+        f"confirmation_key={key} now, then tell me what happened."
     )
-    try:
-        reply = agent_chat.ask([{"role": "user", "content": instruction}])
-    except agent_chat.ChatError as err:
-        logger.exception("Could not hand trade #%s to the agent", trade_id)
-        raise ValidationError(
-            f"Could not reach the agent to execute the trade: {err}. The proposal "
-            "is still approved - its key expires in "
-            f"{schema.KEY_TTL_MINUTES} minutes."
-        ) from err
 
     return jsonify(
         serialize(
             {
                 "trade": schema.get_trade(trade_id),
-                "agent_reply": reply.get("reply"),
+                "chat_message": instruction,
                 "note": (
-                    "The confirmation key was sent to the agent, which executes the "
-                    "order. Refresh the queue to see the outcome."
+                    f"Approved. The key expires in {schema.KEY_TTL_MINUTES} minutes - "
+                    "send the message waiting on the Chat tab to have the agent "
+                    "place the order."
                 ),
             }
         )

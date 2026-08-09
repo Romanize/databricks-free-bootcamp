@@ -91,14 +91,18 @@ function emptyRow(tbody, columns, message) {
 
 // -------------------------------------------------------------------- tabs
 
+function showTab(name) {
+  const button = document.querySelector(`.tab[data-tab="${name}"]`);
+  if (!button) return;
+  document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+  document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
+  button.classList.add("active");
+  document.getElementById(`tab-${name}`).classList.add("active");
+  return loadTab(name);
+}
+
 document.querySelectorAll(".tab").forEach((button) => {
-  button.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
-    document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
-    button.classList.add("active");
-    document.getElementById(`tab-${button.dataset.tab}`).classList.add("active");
-    loadTab(button.dataset.tab);
-  });
+  button.addEventListener("click", () => showTab(button.dataset.tab));
 });
 
 function loadTab(name) {
@@ -111,7 +115,7 @@ function loadTab(name) {
     trades: loadTrades,
     chat: loadChat,
   };
-  (loaders[name] || (() => {}))().catch((err) => showError(err.message));
+  return (loaders[name] || (() => Promise.resolve()))().catch((err) => showError(err.message));
 }
 
 // ----------------------------------------------------------------- overview
@@ -591,55 +595,69 @@ document.getElementById("sentiment-form").addEventListener("submit", async (even
   }
 });
 
+// The article table is paged rather than capped: the 2-hourly job keeps adding
+// rows, and "the latest 25" quietly hides the rest. `newsOffset` is the only
+// state - the server owns the total and the page size.
+const NEWS_PAGE_SIZE = 25;
+let newsOffset = 0;
+let newsSymbol = "";
+
 async function loadArticles() {
-  const articles = await api("/api/news?limit=25");
-  if (!articles.length) {
-    emptyRow("news-rows", 5, "No articles stored yet - run the ingestion job.");
-    return;
-  }
-  document.getElementById("news-rows").innerHTML = articles
-    .map(
-      (row) => `<tr>
+  const params = new URLSearchParams({ limit: NEWS_PAGE_SIZE, offset: newsOffset });
+  if (newsSymbol) params.set("symbol", newsSymbol);
+  const page = await api(`/api/news?${params}`);
+
+  // A page can come back empty because the filter matches nothing, or because
+  // the offset ran off the end after a filter change - say which.
+  if (!page.articles.length) {
+    emptyRow(
+      "news-rows",
+      5,
+      page.total
+        ? "No articles on this page - go back."
+        : newsSymbol
+          ? `No articles stored for ${newsSymbol} yet.`
+          : "No articles stored yet - run the ingestion job.",
+    );
+  } else {
+    document.getElementById("news-rows").innerHTML = page.articles
+      .map(
+        (row) => `<tr>
         <td>${date(row.published_utc)}</td>
         <td><a href="${escapeHtml(row.article_url || "#")}" target="_blank" rel="noopener">${escapeHtml(row.title)}</a></td>
         <td>${escapeHtml((row.tickers || []).join(", "))}</td>
         <td>${escapeHtml(row.publisher || "-")}</td>
         <td class="num">${row.chunk_count}</td>
       </tr>`,
-    )
-    .join("");
+      )
+      .join("");
+  }
+
+  const last = page.offset + page.articles.length;
+  document.getElementById("news-range").textContent = page.total
+    ? `${page.offset + 1}\u2013${last} of ${page.total}${newsSymbol ? ` for ${newsSymbol}` : ""}`
+    : "";
+  document.getElementById("news-prev").disabled = page.offset === 0;
+  document.getElementById("news-next").disabled = last >= page.total;
 }
 
-document.getElementById("sync-news").addEventListener("click", async (event) => {
-  const symbol = prompt("Which ticker? (one per request - the free tier is 5 calls/minute)");
-  if (!symbol) return;
-  event.target.disabled = true;
-  event.target.textContent = "Fetching…";
-  try {
-    const result = await api("/api/news/sync", { method: "POST", body: JSON.stringify({ symbol }) });
-    showError(result.note || "");
-    await loadArticles();
-  } catch (err) {
-    showError(err.message);
-  } finally {
-    event.target.disabled = false;
-    event.target.textContent = "Fetch news for one ticker now";
-  }
+document.getElementById("news-prev").addEventListener("click", async () => {
+  newsOffset = Math.max(0, newsOffset - NEWS_PAGE_SIZE);
+  await loadArticles().catch((err) => showError(err.message));
 });
 
-document.getElementById("embed-news").addEventListener("click", async (event) => {
-  event.target.disabled = true;
-  event.target.textContent = "Embedding…";
-  try {
-    const result = await api("/api/news/embed", { method: "POST", body: "{}" });
-    showError(`Embedded ${result.chunks} chunks across ${result.articles} articles.`);
-    await Promise.all([loadArticles(), loadStats()]);
-  } catch (err) {
-    showError(err.message);
-  } finally {
-    event.target.disabled = false;
-    event.target.textContent = "Embed pending articles";
-  }
+document.getElementById("news-next").addEventListener("click", async () => {
+  newsOffset += NEWS_PAGE_SIZE;
+  await loadArticles().catch((err) => showError(err.message));
+});
+
+// Filtering restarts at page 1 - keeping the offset would land on a page that
+// does not exist in the filtered set.
+document.getElementById("news-filter").addEventListener("change", async (event) => {
+  newsSymbol = event.target.value.trim().toUpperCase();
+  event.target.value = newsSymbol;
+  newsOffset = 0;
+  await loadArticles().catch((err) => showError(err.message));
 });
 
 // --------------------------------------------------------------------- plan
@@ -780,7 +798,7 @@ async function loadTradeQueue() {
       } else if (trade.status === "approved") {
         actions = trade.key_expired
           ? '<span class="muted">key expired</span>'
-          : '<span class="muted">key issued, waiting for the agent</span>';
+          : '<span class="muted">key issued &mdash; see the Chat tab</span>';
       } else if (trade.filled_price) {
         actions = `<span class="muted">filled ${money(trade.filled_price)}</span>`;
       }
@@ -805,8 +823,8 @@ document.getElementById("trade-rows").addEventListener("click", async (event) =>
   if (
     approve &&
     !confirm(
-      "Accept this proposal? This mints a confirmation key and sends it to the agent, " +
-        "which will place the order with Alpaca.",
+      "Accept this proposal? This mints a confirmation key and sends it to the agent " +
+        "on the Chat tab, which will place the order with Alpaca.",
     )
   )
     return;
@@ -815,19 +833,24 @@ document.getElementById("trade-rows").addEventListener("click", async (event) =>
   const replyBox = document.getElementById("trade-reply");
   try {
     if (approve) {
-      replyBox.innerHTML = '<p class="muted">Handing the key to the agent…</p>';
+      replyBox.innerHTML = '<p class="muted">Minting the confirmation key…</p>';
       const result = await api(`/api/trades/${approve}/approve`, { method: "POST" });
-      replyBox.innerHTML = `<p class="muted">${escapeHtml(result.note)}</p>
-        ${result.agent_reply ? `<p><strong>Agent:</strong> ${escapeHtml(result.agent_reply)}</p>` : ""}`;
+      replyBox.innerHTML = `<p class="muted">${escapeHtml(result.note)}</p>`;
       showError("");
-    } else {
-      await api(`/api/trades/${reject}/reject`, {
-        method: "POST",
-        body: JSON.stringify({ reason: "Rejected in the app." }),
-      });
-      replyBox.innerHTML = "";
-      showError("");
+      await loadTradeQueue();
+      // Hand off to the Chat tab: the approval message is posted as an ordinary
+      // turn so the user watches execute_trade run and reads the outcome in the
+      // same conversation, rather than getting a summary of a hidden exchange.
+      await sendToChat(result.chat_message);
+      return;
     }
+
+    await api(`/api/trades/${reject}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason: "Rejected in the app." }),
+    });
+    replyBox.innerHTML = "";
+    showError("");
     await loadTrades();
   } catch (err) {
     replyBox.innerHTML = "";
@@ -1023,16 +1046,37 @@ async function runChat(body) {
   Promise.all([loadTradeQueue(), loadStats()]).catch(() => {});
 }
 
+function askAgent(text) {
+  chatHistory.push({ role: "user", content: text });
+  return runChat({
+    messages: chatHistory.filter((m) => m.content),
+    auto_approve: autoApprove.checked,
+  });
+}
+
 document.getElementById("chat-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const input = document.getElementById("chat-input");
   const text = input.value.trim();
   if (!text) return;
 
-  chatHistory.push({ role: "user", content: text });
   input.value = "";
-  runChat({ messages: chatHistory.filter((m) => m.content), auto_approve: autoApprove.checked });
+  askAgent(text);
 });
+
+/**
+ * Move to the Chat tab and send `text` as the user's turn.
+ *
+ * Used by the Accept button on the Trades tab: the message it sends carries the
+ * confirmation key, so the tab has to be visible and the turn has to be a normal
+ * one - the point is that the user sees exactly what was handed over and watches
+ * the trade execute, instead of trusting a summary.
+ */
+async function sendToChat(text) {
+  if (!text) return;
+  await showTab("chat");
+  await askAgent(text);
+}
 
 // Accept / Reject on an approval card. Delegated, because renderChat() rebuilds
 // the whole log and any listener bound to a button would be thrown away with it.

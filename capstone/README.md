@@ -12,8 +12,8 @@ a tracing dashboard (day 3) — into one system, in its own isolated space.
    you  ────────►│  holdings · report builder · plan · charts · approvals    │
                  │  chat tab ──────────┐                                     │
                  └─────────────────────┼──────────────────────────────────────┘
-                            Accept ──► │ mints a single-use confirmation key
-                                       ▼ and forwards it
+                            Accept ──► │ mints a single-use confirmation key,
+                                       ▼ sends it as a chat turn
                           ┌────────────────────┐
                           │  Agent Bricks      │
                           │  agent + prompt    │
@@ -37,7 +37,7 @@ a tracing dashboard (day 3) — into one system, in its own isolated space.
         └───────────────────────────┘         └────────────────────────┘
                       │
                       ▼
-        Unity Catalog Delta: holdings_scd, networth_history
+        Unity Catalog Delta: holdings_scd, watchlist_scd
 ```
 
 ## Live links
@@ -81,6 +81,15 @@ Only the SHA-256 is stored, so reading the database yields nothing usable
 either. A fully jailbroken agent can call `execute_trade` all it likes and gets
 a single, uninformative rejection every time.
 
+Accept does not talk to the agent behind your back. It mints the key, switches
+you to the Chat tab and posts the redeeming instruction as an ordinary turn, so
+the handoff, the `execute_trade` call and the fill all appear in the
+conversation you are already reading. The key is therefore visible in that
+transcript — which is acceptable precisely because of rows 3 and 4 above: by the
+time anyone reads it back, it is spent, and in any case dead within 15 minutes.
+The alternative, a hidden server-to-agent call summarised in one line, hides the
+one step most worth watching.
+
 This is a genuine change from an earlier revision, which made the agent
 _structurally_ incapable of trading by never importing the order code. That was
 a stronger guarantee and a worse product — the whole point is that the agent can
@@ -113,7 +122,7 @@ capstone/
 │
 ├── notebooks/
 │   ├── ingest_news_embeddings.py    every 2 hours
-│   └── scd_holdings_networth.py     daily, Lakebase → Unity Catalog
+│   └── scd_holdings_watchlist.py    daily, Lakebase → Unity Catalog
 │
 ├── agent/system_prompt.md      the Agent Bricks prompt + why it is shaped that way
 ├── sql/                        generated DDL + example queries
@@ -340,7 +349,7 @@ Workflows → Create job → Notebook task:
 | Notebook                              | Schedule      | Cron            |
 | ------------------------------------- | ------------- | --------------- |
 | `notebooks/ingest_news_embeddings.py` | every 2 hours | `0 0 */2 * * ?` |
-| `notebooks/scd_holdings_networth.py`  | daily, 03:30  | `0 30 3 * * ?`  |
+| `notebooks/scd_holdings_watchlist.py` | daily, 03:30  | `0 30 3 * * ?`  |
 
 The news job needs READ on the scope for `lakebase-url` and `massive-api-key`.
 The SCD job needs `lakebase-url` plus `CREATE TABLE` on the target Unity Catalog

@@ -174,14 +174,17 @@
 
     <h3>Stored articles</h3>
     <div class="row">
-      <button id="sync-news" type="button">Fetch news for one ticker now</button>
-      <button id="embed-news" type="button">Embed pending articles</button>
-      <span class="muted">Bulk ingestion is the 2-hourly job; these are for demos.</span>
+      <input id="news-filter" placeholder="Filter by ticker (optional)" autocomplete="off">
     </div>
     <table>
       <thead><tr><th>Published</th><th>Title</th><th>Tickers</th><th>Publisher</th><th class="num">Chunks</th></tr></thead>
       <tbody id="news-rows"><tr><td colspan="5">Loading&hellip;</td></tr></tbody>
     </table>
+    <div class="row pager">
+      <button id="news-prev" type="button">&larr; Newer</button>
+      <span id="news-range" class="muted"></span>
+      <button id="news-next" type="button">Older &rarr;</button>
+    </div>
   </section>
 
   <!-- ================================================================ PLAN -->
@@ -222,9 +225,10 @@
     <h3>Approval queue</h3>
     <p class="muted">
       The agent can <em>propose</em> trades but cannot execute one on its own. Clicking
-      <strong>Accept</strong> mints a single-use confirmation key and hands it to the agent,
-      which is the only way an order reaches Alpaca. Your holdings and reports are not
-      changed by a trade &mdash; submit a new report afterwards to pick up the new position.
+      <strong>Accept</strong> mints a single-use confirmation key, then opens the
+      <strong>Chat</strong> tab and sends it to the agent for you &mdash; that message is the
+      only way an order reaches Alpaca. Your holdings and reports are not changed by a
+      trade &mdash; submit a new report afterwards to pick up the new position.
     </p>
     <table>
       <thead><tr><th>When</th><th>Proposal</th><th>By</th><th>Rationale</th><th>Status</th><th></th></tr></thead>

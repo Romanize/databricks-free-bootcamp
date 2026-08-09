@@ -638,10 +638,22 @@ def sentiment_timeline(symbol: str, days: int = 90) -> list[dict]:
     )
 
 
-def recent_articles(symbol: str | None = None, limit: int = 20) -> list[dict]:
-    """Latest stored articles, optionally filtered to one ticker."""
-    where = "WHERE %s = ANY(tickers)" if symbol else ""
-    params = ([symbol.upper()] if symbol else []) + [limit]
+ARTICLE_FILTER = "WHERE %s = ANY(tickers)"
+
+
+def recent_articles(
+    symbol: str | None = None, limit: int = 20, offset: int = 0
+) -> list[dict]:
+    """
+    One page of stored articles, newest first, optionally filtered to a ticker.
+
+    `id` breaks ties in the ORDER BY: `published_utc` is not unique - a job run
+    can store a dozen articles sharing a timestamp - and without a tiebreaker
+    Postgres is free to order those rows differently on each query, which shows
+    up as a row appearing on both page 1 and page 2.
+    """
+    where = ARTICLE_FILTER if symbol else ""
+    params = ([symbol.upper()] if symbol else []) + [limit, offset]
     return app_db.query(
         f"""
         SELECT n.id, n.title, n.description, n.article_url, n.publisher,
@@ -650,11 +662,20 @@ def recent_articles(symbol: str | None = None, limit: int = 20) -> list[dict]:
                    AS chunk_count
         FROM ticker_news n
         {where}
-        ORDER BY n.published_utc DESC NULLS LAST
-        LIMIT %s
+        ORDER BY n.published_utc DESC NULLS LAST, n.id DESC
+        LIMIT %s OFFSET %s
         """,
         tuple(params),
     )
+
+
+def count_articles(symbol: str | None = None) -> int:
+    """How many articles the same filter matches - the pager's denominator."""
+    where = ARTICLE_FILTER if symbol else ""
+    params = (symbol.upper(),) if symbol else ()
+    return app_db.query_one(
+        f"SELECT COUNT(*) AS total FROM ticker_news {where}", params
+    )["total"]
 
 
 # -------------------------------------------------------------- vector search

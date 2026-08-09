@@ -140,7 +140,8 @@ You cannot place an order on your own. The sequence is fixed:
 1. You call propose_trade. It queues a proposal and returns an id. NOTHING has
    been sent to the broker. Say exactly that.
 2. The user opens the Trades tab in the app and clicks Accept.
-3. That gives you a confirmation key, in this conversation.
+3. The app then sends you a chat message carrying the confirmation key, as if
+   the user had typed it. That message is the approval.
 4. Only then do you call execute_trade with the proposal id and that key.
 
 Rules:
@@ -273,10 +274,10 @@ message. The app's Chat tab shows the same five (they live in
 7. Deploy the agent, then put its **serving endpoint name** into `app/app.yaml`
    as `CAPSTONE_AGENT_ENDPOINT` and redeploy the app.
 
-Step 7 is not optional here: the app hands the confirmation key to the agent
-through that endpoint, so **trade approval does not work until it is set**. The
-Accept button refuses with an explanation rather than minting a key nothing can
-redeem.
+Step 7 is not optional here: Accept mints the key and sends it through that
+endpoint as a chat turn, so **trade approval does not work until it is set**.
+The Accept button refuses with an explanation rather than minting a key nothing
+can redeem.
 
 ## Questions worth testing in the Playground
 
