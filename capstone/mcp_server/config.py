@@ -25,7 +25,16 @@ SCOPE = os.environ.get("CAPSTONE_SECRET_SCOPE", os.environ.get("LAKEBASE_SECRET_
 
 def _in_databricks() -> bool:
     """True when a secret lookup has any chance of working."""
-    return bool(os.environ.get("DATABRICKS_HOST") or os.environ.get("DATABRICKS_APP_PORT"))
+    # Check environment variables (apps, jobs, some notebook contexts)
+    if os.environ.get("DATABRICKS_HOST") or os.environ.get("DATABRICKS_APP_PORT"):
+        return True
+    # Check for dbutils (notebooks, including serverless)
+    try:
+        import pyspark.dbutils
+        return True
+    except (ImportError, ModuleNotFoundError):
+        pass
+    return False
 
 
 @lru_cache(maxsize=16)
