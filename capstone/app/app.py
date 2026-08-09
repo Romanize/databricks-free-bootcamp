@@ -30,6 +30,7 @@ the Agent Bricks agent.
     GET    /api/broker                  Alpaca account and positions
     GET    /api/chat/status             whether the agent endpoint is configured
     POST   /api/chat                    forward a conversation to the agent
+    POST   /api/chat/stream             the same, streamed back as SSE
     GET    /healthz
 
 Everything is USD. There is no currency handling anywhere.
@@ -40,10 +41,11 @@ Deploy:       Databricks Apps, see app.yaml + ../README.md
 
 import datetime as dt
 import decimal
+import json
 import logging
 import os
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 from psycopg2 import errors as pg_errors
 
 import agent_chat
@@ -129,6 +131,14 @@ def optional_number(data: dict, field: str, minimum: float | None = None):
     if minimum is not None and value < minimum:
         raise ValidationError(f"'{field}' must be at least {minimum}.")
     return value
+
+
+def _chat_messages() -> list:
+    """The [{role, content}] history both chat routes expect."""
+    messages = payload().get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise ValidationError("'messages' must be a non-empty list of {role, content}.")
+    return messages
 
 
 def parse_date(value):
@@ -814,11 +824,42 @@ def chat_status():
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
-    """Forward the conversation to the Agent Bricks agent."""
-    messages = payload().get("messages")
-    if not isinstance(messages, list) or not messages:
-        raise ValidationError("'messages' must be a non-empty list of {role, content}.")
-    return jsonify(agent_chat.ask(messages))
+    """Forward the conversation and wait for the whole answer."""
+    return jsonify(agent_chat.ask(_chat_messages()))
+
+
+@app.route("/api/chat/stream", methods=["POST"])
+def chat_stream():
+    """
+    The same conversation, streamed to the browser as it is written.
+
+    Validation happens out here, before the generator starts, so a bad request
+    is still a plain 400 - once the response has begun streaming the status
+    code is already sent and cannot be taken back. For the same reason errors
+    raised *inside* the generator are turned into an SSE `error` event by hand:
+    Flask's error handlers cannot rescue a response that is already in flight.
+    """
+    messages = _chat_messages()
+
+    def events():
+        try:
+            for event in agent_chat.stream(messages):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as err:  # noqa: BLE001 - the client needs to hear about all of them
+            logger.exception("Chat stream failed")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(err)})}\n\n"
+
+    return Response(
+        events(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Tells nginx-style proxies not to sit on the response until it is
+            # complete, which would defeat the entire point of streaming.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------------------------------------------------------- startup

@@ -39,6 +39,10 @@ class ChatError(Exception):
     """A user-facing chat failure."""
 
 
+class _NotStreamable(Exception):
+    """Internal: this endpoint will not stream, so use the blocking path."""
+
+
 def is_configured() -> bool:
     return bool(ENDPOINT)
 
@@ -292,3 +296,122 @@ def ask(messages: list) -> dict:
         f"Could not get a reply from the agent endpoint {ENDPOINT!r}. "
         + " | ".join(failures)
     )
+
+# ---------------------------------------------------------------- streaming
+
+
+def _stream_delta(event: dict) -> str:
+    """Pull the incremental text out of one streamed event, if it has any."""
+    if not isinstance(event, dict):
+        return ""
+
+    # Responses API: {"type": "response.output_text.delta", "delta": "..."}
+    delta = event.get("delta")
+    if isinstance(delta, str):
+        return delta
+    if isinstance(delta, dict):
+        if isinstance(delta.get("content"), str):
+            return delta["content"]
+        for block in delta.get("content") or []:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                return block["text"]
+
+    # Chat completions: {"choices": [{"delta": {"content": "..."}}]}
+    for choice in event.get("choices") or []:
+        piece = ((choice or {}).get("delta") or {}).get("content")
+        if isinstance(piece, str):
+            return piece
+
+    if event.get("type", "").endswith("delta") and isinstance(event.get("text"), str):
+        return event["text"]
+
+    return ""
+
+
+def stream(messages: list):
+    """
+    Yield the agent's answer in pieces as it is written.
+
+    Emits {"type": "delta", "text": ...} repeatedly, then {"type": "done"}.
+
+    Falls back to the blocking `ask()` and emits the whole answer as one delta
+    whenever streaming is not available - a request the endpoint refuses, a
+    stream that carries no text, or a transport error before any text arrived.
+    Once text HAS been shown, a mid-stream failure is reported as an error
+    rather than retried, because replaying would duplicate what the user is
+    already reading.
+    """
+    if not is_configured():
+        raise ChatError(status()["message"])
+
+    history = _clean(messages)
+    streamed_any = False
+
+    try:
+        from databricks.sdk import WorkspaceClient
+
+        config = WorkspaceClient().config
+        url = f"{config.host.rstrip('/')}/serving-endpoints/{ENDPOINT}/invocations"
+        response = requests.post(
+            url,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+                **config.authenticate(),
+            },
+            json={"input": history, "stream": True},
+            stream=True,
+            timeout=TIMEOUT,
+        )
+
+        if response.status_code >= 400:
+            detail = (response.text or "")[:200]
+            logger.info("Endpoint %s refused to stream (%s): %s",
+                        ENDPOINT, response.status_code, detail)
+            raise _NotStreamable(f"HTTP {response.status_code}")
+
+        for raw in response.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            line = raw.strip()
+            if not line.startswith("data:"):
+                continue
+            chunk = line[len("data:"):].strip()
+            if not chunk or chunk == "[DONE]":
+                continue
+            try:
+                event = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+
+            piece = _stream_delta(event)
+            if piece:
+                streamed_any = True
+                yield {"type": "delta", "text": piece}
+                continue
+
+            # Some endpoints stream nothing but a single final object.
+            final = event.get("response") if isinstance(event.get("response"), dict) else event
+            text = _extract_reply(final)
+            if text and not streamed_any:
+                streamed_any = True
+                yield {"type": "delta", "text": text}
+
+        if not streamed_any:
+            raise _NotStreamable("the stream carried no text")
+
+        yield {"type": "done"}
+        return
+
+    except _NotStreamable as err:
+        logger.info("Falling back to a blocking call: %s", err)
+    except Exception as err:
+        if streamed_any:
+            logger.exception("Stream broke after text had been sent")
+            yield {"type": "error", "message": f"The reply was cut short: {err}"}
+            return
+        logger.info("Streaming failed before any text (%s); falling back", err)
+
+    # Fallback: one blocking call, delivered as a single delta.
+    yield {"type": "delta", "text": ask(messages)["reply"]}
+    yield {"type": "done"}

@@ -356,6 +356,22 @@ schema (default `main.capstone_analytics`, a widget).
    up with you.
 5. Run the news job once by hand, or use "Fetch news for one ticker now".
 
+## Challenges
+
+- Configuring and deploying the agent, giving permissions to the app service principal
+  and later debugging a couple of hours which is actually the expected input/output and
+  streaming vs block to make it work in the app client.
+
+  Two things made that slow to see. `serving_endpoints.query()` deserializes into a
+  dataclass with no `output` field, so a ResponsesAgent's whole answer is dropped in
+  transit and you are left holding a response id and three empty lists — it looks
+  exactly like an endpoint returning nothing. And the endpoint answers a stream, so
+  parsing the body as one JSON document fails at character 0, which reads like a
+  network error rather than a format mismatch. `agent_chat.py` now posts to
+  `/serving-endpoints/<name>/invocations` directly, tries `input` first and keeps
+  `messages`/`dataframe_records` as fallbacks, and understands both a whole-document
+  reply and a stream.
+
 ## Known limitations / what I'd do next
 
 - **News fetching is O(tickers) requests.** At 12.5s apart, a 50-ticker watchlist

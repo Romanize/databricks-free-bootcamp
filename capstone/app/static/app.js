@@ -872,13 +872,57 @@ document.getElementById("chat-suggestions").addEventListener("click", (event) =>
   document.getElementById("chat-form").requestSubmit();
 });
 
+// Reads the SSE response from /api/chat/stream and hands each piece of text to
+// `onPiece` as it lands. Not EventSource: that can only issue GETs, and the
+// conversation history has to be POSTed.
+async function streamChat(messages, onPiece) {
+  const response = await fetch("/api/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages }),
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || `${response.status} ${response.statusText}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // Events are separated by a blank line; the trailing fragment is kept for
+    // the next read because a chunk can split an event in half.
+    const events = buffer.split("\n\n");
+    buffer = events.pop();
+
+    for (const block of events) {
+      const line = block.split("\n").find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      let event;
+      try {
+        event = JSON.parse(line.slice(5).trim());
+      } catch {
+        continue;
+      }
+      if (event.type === "delta" && event.text) onPiece(event.text);
+      else if (event.type === "error") throw new Error(event.message);
+    }
+  }
+}
+
 function renderChat() {
   const log = document.getElementById("chat-log");
   log.innerHTML = chatHistory
     .map(
       (message) =>
         `<div class="message ${message.role}"><span class="who">${message.role}</span>
-         <div>${escapeHtml(message.content)}</div></div>`,
+         <div>${escapeHtml(message.content)}${message.streaming ? '<span class="cursor">\u258d</span>' : ""}</div></div>`,
     )
     .join("");
   log.scrollTop = log.scrollHeight;
@@ -897,11 +941,21 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
   renderChat();
 
   try {
-    const result = await api("/api/chat", {
-      method: "POST",
-      body: JSON.stringify({ messages: chatHistory.filter((m) => m !== thinking) }),
-    });
-    thinking.content = result.reply || "(the agent returned an empty reply)";
+    await streamChat(
+      chatHistory.filter((m) => m !== thinking),
+      (piece) => {
+        // First piece replaces the placeholder rather than appending to it.
+        thinking.content = thinking.streaming ? thinking.content + piece : piece;
+        thinking.streaming = true;
+        renderChat();
+      },
+    );
+    delete thinking.streaming;
+    // Pieces arrive with their own spacing; the last one usually ends in one.
+    thinking.content = thinking.content.trim();
+    if (!thinking.content || thinking.content === "…") {
+      thinking.content = "(the agent returned an empty reply)";
+    }
   } catch (err) {
     // Drop the placeholder rather than leaving a fake turn in the history that
     // the next request would forward back to the agent.
