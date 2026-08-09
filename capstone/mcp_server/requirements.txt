@@ -1,5 +1,6 @@
 fastmcp>=3.2.0
 requests>=2.32.3
+pg8000>=1.31.2
 psycopg2-binary>=2.9.9
 databricks-sdk>=0.30.0
 sentence-transformers>=3.0.1

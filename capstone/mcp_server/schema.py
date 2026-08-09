@@ -38,17 +38,20 @@ price of it is that a deleted holding would orphan history, so the foreign key
 is `ON DELETE RESTRICT` and `delete_holding()` deactivates instead.
 
 This file is duplicated in app/ - each Databricks App deploys from its own
-folder, so the apps cannot import a shared module. Keep the copies in sync.
+folder, so the apps cannot import a shared module. The two copies have diverged
+on one point only: this one is the one the notebooks import, so it binds through
+pg8000 (`json.dumps(...)` + `%s::jsonb` rather than `psycopg2.extras.Json`, and
+`execute_values` from lakebase rather than from psycopg2). Every statement,
+constraint and function below is identical. See the header of lakebase.py.
 """
 
 import hashlib
+import json
 import logging
 import secrets
 
-from psycopg2.extras import Json, execute_values
-
 from embeddings import EMBEDDING_DIM
-from lakebase import app_db
+from lakebase import app_db, execute_values
 
 logger = logging.getLogger(__name__)
 
@@ -509,7 +512,7 @@ UPSERT_NEWS_SQL = """
         END
 """
 
-UPSERT_NEWS_TEMPLATE = "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s, now())"
+UPSERT_NEWS_TEMPLATE = "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s::jsonb, now())"
 
 
 def upsert_articles(articles: list[dict]) -> int:
@@ -529,7 +532,7 @@ def upsert_articles(articles: list[dict]) -> int:
             article.get("tickers") or [],
             article.get("keywords") or [],
             article.get("published_utc"),
-            Json(article.get("payload") or {}),
+            json.dumps(article.get("payload") or {}),
         )
         for article in articles
     ]
@@ -623,7 +626,12 @@ def sentiment_timeline(symbol: str, days: int = 90) -> list[dict]:
         """
         SELECT day, articles, positive, neutral, negative, score
         FROM ticker_sentiment_daily
-        WHERE symbol = %s AND day > CURRENT_DATE - %s
+        -- `::int` is load-bearing: psycopg2 interpolated the bound value as a
+        -- literal, so Postgres read it as int4, but pg8000 sends it as a real
+        -- parameter and `date - $2` is ambiguous (date-int4 and date-date are
+        -- both candidates). Without the cast it resolves to date-date and the
+        -- comparison fails with "operator does not exist: date > integer".
+        WHERE symbol = %s AND day > CURRENT_DATE - %s::int
         ORDER BY day
         """,
         (symbol.upper(), days),

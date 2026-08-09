@@ -14,7 +14,7 @@ Carried over from homework 2 with two changes:
   * `embed_pending()` returns the per-symbol counts the job logs.
 
 The model is loaded once per process behind an lru_cache, never per request.
-Writes go through psycopg2 with the vector passed as a literal and cast with
+Writes go through pg8000 with the vector passed as a literal and cast with
 %s::vector - no Spark JDBC anywhere in this pipeline.
 """
 
@@ -22,9 +22,7 @@ import logging
 import os
 from functools import lru_cache
 
-from psycopg2.extras import execute_values
-
-from lakebase import app_db
+from lakebase import app_db, execute_values
 
 logger = logging.getLogger(__name__)
 

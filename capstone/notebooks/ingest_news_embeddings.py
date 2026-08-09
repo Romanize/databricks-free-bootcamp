@@ -10,7 +10,7 @@
 # MAGIC    into `ticker_sentiments`.
 # MAGIC 3. Chunks and embeds whatever is pending with
 # MAGIC    `sentence-transformers/all-MiniLM-L6-v2` (384-dim), upserting into
-# MAGIC    `tickers_news_embeddings` via psycopg2 + `execute_values`, casting each
+# MAGIC    `tickers_news_embeddings` via pg8000 + batched `execute_values`, casting each
 # MAGIC    vector with `%s::vector`.
 # MAGIC
 # MAGIC "Tracked" means **the watchlist plus everything currently held** - you want
@@ -45,7 +45,23 @@
 # COMMAND ----------
 
 # DBTITLE 1,Install dependencies (notebook only)
-# MAGIC %pip install -q 'databricks-sdk>=0.30.0' psycopg2-binary sentence-transformers requests
+# MAGIC %pip install -q 'databricks-sdk>=0.30.0' 'pg8000>=1.31.2' sentence-transformers requests
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Why pg8000 and not psycopg2
+# MAGIC
+# MAGIC `psycopg2-binary` is a C extension carrying its own libpq and OpenSSL. On a
+# MAGIC Databricks Runtime those have to coexist with the image's copies, and when
+# MAGIC they disagree the notebook does not raise - the kernel dies, which is what
+# MAGIC these two jobs were hitting. `pg8000` implements the Postgres wire protocol
+# MAGIC in pure Python, so there is nothing to link and nothing to clash: it installs
+# MAGIC and imports on any runtime version.
+# MAGIC
+# MAGIC The driver differences (dict rows, typed errors, `execute_values`) are all
+# MAGIC absorbed in `mcp_server/lakebase.py`, so nothing below this cell knows which
+# MAGIC driver is in use.
 
 # COMMAND ----------
 

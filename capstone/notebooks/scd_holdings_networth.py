@@ -30,7 +30,7 @@
 # MAGIC
 # MAGIC ## How the data gets across
 # MAGIC
-# MAGIC Read with **psycopg2 into Python, then `spark.createDataFrame`** - not
+# MAGIC Read with **pg8000 into Python, then `spark.createDataFrame`** - not
 # MAGIC `spark.read.jdbc`. Same constraint as homework 2: JDBC against this Lakebase
 # MAGIC instance is not supported. The volumes here are tiny (tens of holdings,
 # MAGIC hundreds of reports), so a driver-side read is the right size of tool.
@@ -43,7 +43,23 @@
 # COMMAND ----------
 
 # DBTITLE 1,Install dependencies (notebook only)
-# MAGIC %pip install -q 'databricks-sdk>=0.30.0' psycopg2-binary
+# MAGIC %pip install -q 'databricks-sdk>=0.30.0' 'pg8000>=1.31.2'
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Why pg8000 and not psycopg2
+# MAGIC
+# MAGIC `psycopg2-binary` is a C extension carrying its own libpq and OpenSSL. On a
+# MAGIC Databricks Runtime those have to coexist with the image's copies, and when
+# MAGIC they disagree the notebook does not raise - the kernel dies, which is what
+# MAGIC these two jobs were hitting. `pg8000` implements the Postgres wire protocol
+# MAGIC in pure Python, so there is nothing to link and nothing to clash: it installs
+# MAGIC and imports on any runtime version.
+# MAGIC
+# MAGIC The driver differences (dict rows, typed errors, `execute_values`) are all
+# MAGIC absorbed in `mcp_server/lakebase.py`, so nothing below this cell knows which
+# MAGIC driver is in use.
 
 # COMMAND ----------
 
