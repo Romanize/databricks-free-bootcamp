@@ -143,14 +143,17 @@ canvas { max-height: 320px; }
   border: 1px solid rgba(128,128,128,0.35);
   border-radius: 6px;
   padding: 0.75rem;
-  height: 22rem;
+  height: 28rem;
   overflow-y: auto;
   margin-bottom: 0.75rem;
 }
 .message { margin-bottom: 0.75rem; }
 .message .who { font-size: 0.7rem; text-transform: uppercase; opacity: 0.6; display: block; }
-.message.user div { font-weight: 500; }
-.message.assistant div { white-space: pre-wrap; }
+/* Scoped to text blocks on purpose: a turn's body is now a column of blocks,
+   and pre-wrap on all of them would put the chart wrapper's own whitespace on
+   the page. */
+.message .blocks > .text { white-space: pre-wrap; }
+.message.user .blocks > .text { font-weight: 500; }
 
 #chat-input { flex: 1; min-width: 16rem; }
 
@@ -184,7 +187,9 @@ button.chip { cursor: pointer; font: inherit; font-size: 0.85rem; }
 /* Same translucent-accent idiom as .badge: readable in both schemes without
    naming a single text colour. */
 
-.tool-trail { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 0.4rem; }
+/* One row per call, in the place in the answer where the agent made it - not a
+   strip above the reply, which said nothing about when anything happened. */
+.tool-row { margin: 0.35rem 0; }
 .tool {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.72rem;
@@ -208,3 +213,73 @@ button.chip { cursor: pointer; font: inherit; font-size: 0.85rem; }
 .approval div { margin-bottom: 0.4rem; }
 .approval code { font-size: 0.8rem; }
 .approval .chip { cursor: pointer; margin-right: 0.3rem; }
+
+/* ------------------------------------------------- agent-written openers */
+/* The starter questions are generated, not canned, so they are marked as such:
+   a sparkle and a violet tint, which is the one hue this sheet does not use
+   for anything meaningful elsewhere. Translucent like .badge, so it reads on
+   both light and dark without naming a text colour. */
+
+.ai-suggestions { margin-bottom: 0.6rem; }
+
+.ai-note {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.ai-note .spark { font-size: 0.9rem; opacity: 0.9; }
+
+.ai-refresh {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0 0.2rem;
+  opacity: 0.6;
+}
+.ai-refresh:hover:not(:disabled) { opacity: 1; }
+.ai-refresh:disabled { cursor: default; opacity: 0.25; }
+
+.chip.ai {
+  border-color: rgba(126, 92, 214, 0.45);
+  background: rgba(126, 92, 214, 0.1);
+  text-align: left;
+  padding: 0.2rem 0.7rem;
+}
+.chip.ai::before { content: "\2728"; margin-right: 0.35rem; opacity: 0.75; }
+button.chip.ai:hover { background: rgba(126, 92, 214, 0.2); }
+
+/* Placeholder pills held in place while the agent writes. Same footprint as
+   the real chips, so the chat log below does not jump when they arrive. */
+.chip.ghost {
+  display: inline-block;
+  height: 1.6rem;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.chip.ghost::before { content: ""; margin: 0; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 0.2; }
+}
+
+/* --------------------------------------------- a chart inside an answer */
+/* Drawn from the tool's own result, so it sits in the log where the tool ran,
+   above the paragraph explaining it. The box has a fixed height because the log
+   scrolls: a responsive chart with no height collapses to nothing in here. */
+
+.chat-chart {
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  margin: 0.4rem 0 0.6rem;
+}
+.chat-chart-title { font-size: 0.8rem; font-weight: 600; margin-bottom: 0.3rem; }
+.chat-chart-box { position: relative; height: 15rem; }
+.chat-chart p.muted { font-size: 0.75rem; margin: 0.4rem 0 0; }

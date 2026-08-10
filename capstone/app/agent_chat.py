@@ -34,6 +34,7 @@ which queues a row for the approval queue in this same app.
 import json
 import logging
 import os
+import time
 
 import requests
 
@@ -343,6 +344,61 @@ def _stream_delta(event: dict) -> str:
     return ""
 
 
+# Tools whose result the browser can draw a chart from. The payload of these -
+# and only these - is forwarded to the page alongside the "done" frame, so the
+# chart is built from the same numbers the agent was given rather than from
+# numbers it retyped into its answer. Everything else stays server-side: a tool
+# result is not something the chat window has any business showing.
+CHART_TOOLS = {
+    "project_scenario",
+    "get_investment_plan_projection",
+    "get_holdings_breakdown",
+    "get_networth_history",
+}
+
+# A monthly 80-year projection is a few hundred KB of JSON. Past this something
+# is wrong and it is not worth pushing down an SSE stream.
+MAX_TOOL_RESULT_CHARS = 400_000
+
+
+def _tool_result(item: dict) -> dict | None:
+    """
+    The tool's own JSON payload, when the finished frame carries one.
+
+    The output turns up in three shapes depending on how the tool was reached -
+    a JSON string (`function_call_output`), a list of MCP content blocks, or an
+    already-parsed object - and none of them is worth guessing between, so all
+    three are handled. Returns None whenever anything is off; a chart is a nice
+    extra and must never be able to break the answer it sits next to.
+    """
+    output = item.get("output")
+
+    if isinstance(output, dict):
+        structured = output.get("structuredContent")
+        if isinstance(structured, dict):
+            return structured
+        content = output.get("content")
+        if isinstance(content, list):
+            output = content
+        else:
+            return output
+
+    if isinstance(output, list):
+        output = next(
+            (block.get("text") for block in output
+             if isinstance(block, dict) and isinstance(block.get("text"), str)),
+            None,
+        )
+
+    if not isinstance(output, str) or len(output) > MAX_TOOL_RESULT_CHARS:
+        return None
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 # How a turn reports tool use. A locally-defined tool arrives as `function_call`;
 # a tool reached through a registered MCP server arrives as `mcp_approval_request`
 # (the agent asking to run it) and then `mcp_call` (it running).
@@ -533,9 +589,17 @@ By default the question is passed on to the user: the generator emits an
                                    "name": tool_name, "status": "running"}
                         continue
                     tool_name = tool_name or known.get(identifier) or "tool"
-                    yield {"type": "tool",
-                           "id": open_tools.pop(tool_name, identifier),
-                           "name": tool_name, "status": "done"}
+                    finished_event = {"type": "tool",
+                                      "id": open_tools.pop(tool_name, identifier),
+                                      "name": tool_name, "status": "done"}
+                    if tool_name in CHART_TOOLS:
+                        result = _tool_result(item)
+                        # Only a tool that actually answered: a chart of an
+                        # error payload would be an empty axis under a sentence
+                        # explaining that there is no data.
+                        if result and result.get("status") == "success":
+                            finished_event["result"] = result
+                    yield finished_event
                     continue
 
                 piece = _stream_delta(event)
@@ -651,3 +715,117 @@ def ask(messages: list) -> dict:
     if not reply:
         raise ChatError("The agent replied, but with no text in it.")
     return {"reply": reply, "endpoint": ENDPOINT, "tools": tools}
+
+
+# ---------------------------------------------------------------- suggestions
+
+# How many starter questions the chat tab asks for.
+SUGGESTION_COUNT = int(os.environ.get("CAPSTONE_CHAT_SUGGESTION_COUNT", 5))
+
+# Generating these is a whole agent turn - usually with a couple of tool calls
+# in it - so the result is held for a while. The chat tab is opened and left
+# several times in one sitting, and a portfolio does not change so fast that
+# fifteen-minute-old questions are wrong.
+SUGGESTION_TTL = int(os.environ.get("CAPSTONE_CHAT_SUGGESTION_TTL", 900))
+
+# A starter chip has to fit on one line next to four others.
+SUGGESTION_MAX_CHARS = 110
+
+SUGGESTION_REQUEST = (
+    f"Suggest {SUGGESTION_COUNT} short questions I could ask you next about my "
+    "portfolio. First look at what I actually have - use your tools to check my "
+    "holdings, my watchlist, my investment plan and any recent news sentiment - "
+    "and write questions that fit that data, naming my real tickers where it "
+    "helps. If something is missing (no plan, no report, an empty watchlist), "
+    "make one of the questions the one that fixes it.\n\n"
+    "Reply with ONLY a JSON array of strings and nothing else: no prose before "
+    "or after, no markdown fence, no numbering. Each question must be under "
+    f"{SUGGESTION_MAX_CHARS} characters and written in the first person, as if "
+    "I were typing it to you."
+)
+
+# {"at": monotonic seconds, "questions": [...]}
+_suggestion_cache: dict = {"at": 0.0, "questions": []}
+
+
+def _parse_suggestions(reply: str) -> list:
+    """
+    Pull a list of questions out of whatever the agent actually sent.
+
+    It is asked for a bare JSON array, and usually obliges, but a model that
+    wraps it in a ```json fence or falls back to a numbered list should not cost
+    the user their suggestions - the whole point is that nothing here is
+    hardcoded, so there is no list to fall back to.
+    """
+    text = (reply or "").strip()
+
+    # Drop a surrounding markdown fence, if there is one.
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        text = text.rsplit("```", 1)[0]
+
+    questions: list = []
+
+    # Prefer the JSON array, wherever in the reply it starts.
+    start, end = text.find("["), text.rfind("]")
+    if start != -1 and end > start:
+        try:
+            parsed = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            questions = [str(item) for item in parsed if isinstance(item, str)]
+
+    if not questions:
+        # A plain list, one per line. Numbering, bullets and quotes come off.
+        for line in text.splitlines():
+            line = line.strip().strip("`").lstrip("-*").strip()
+            line = line.lstrip("0123456789").lstrip(".)").strip()
+            line = line.strip('"').strip("'").strip()
+            if len(line) > 8 and not line.endswith(":"):
+                questions.append(line)
+
+    cleaned: list = []
+    for question in questions:
+        question = " ".join(question.split())[:SUGGESTION_MAX_CHARS].strip()
+        if question and question not in cleaned:
+            cleaned.append(question)
+    return cleaned[:SUGGESTION_COUNT]
+
+
+def suggestions(*, refresh: bool = False) -> dict:
+    """
+    Starter questions for the chat tab, written by the agent itself.
+
+    Returns {"suggestions": [...], "generated_at": epoch, "cached": bool}.
+    Raises ChatError when the agent is not configured or could not answer - the
+    caller shows that instead of questions, because there is deliberately no
+    hardcoded list to show in its place.
+    """
+    if not is_configured():
+        raise ChatError(status()["message"])
+
+    now = time.monotonic()
+    if (
+        not refresh
+        and _suggestion_cache["questions"]
+        and now - _suggestion_cache["at"] < SUGGESTION_TTL
+    ):
+        return {
+            "suggestions": list(_suggestion_cache["questions"]),
+            "cached": True,
+            "ttl": SUGGESTION_TTL,
+        }
+
+    # auto_approve is forced for the same reason `ask()` forces it: this runs
+    # while the tab is opening, with nobody watching a chat window to click
+    # Accept on a read-only lookup.
+    answer = ask([{"role": "user", "content": SUGGESTION_REQUEST}])
+    questions = _parse_suggestions(answer["reply"])
+    if not questions:
+        raise ChatError("The agent did not return any questions.")
+
+    _suggestion_cache["questions"] = questions
+    _suggestion_cache["at"] = now
+    logger.info("Generated %d chat suggestions", len(questions))
+    return {"suggestions": questions, "cached": False, "ttl": SUGGESTION_TTL}

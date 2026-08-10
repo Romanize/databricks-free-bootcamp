@@ -49,6 +49,16 @@ env:
   # agent calls tools one at a time, so a thorough answer needs several rounds.
   - name: CAPSTONE_CHAT_TOOL_ROUNDS
     value: "8"
+  # The chat tab's starter questions are written by the agent, from the actual
+  # holdings, watchlist and plan - there is no hardcoded list. That costs a
+  # whole turn, so the answer is held for this many seconds and reused as the
+  # tab is opened and left; the refresh button beside the chips forces a new
+  # one regardless.
+  - name: CAPSTONE_CHAT_SUGGESTION_TTL
+    value: "900"
+  # How many of those questions to ask for.
+  - name: CAPSTONE_CHAT_SUGGESTION_COUNT
+    value: "5"
 
   # How many days before the "time for a new report" banner appears.
   - name: REPORT_STALE_DAYS

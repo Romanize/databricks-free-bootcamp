@@ -16,10 +16,9 @@ This file is duplicated in dashboard/ - each Databricks App deploys from its own
 folder, so the apps cannot import a shared module. Keep the copies in sync.
 """
 
+import json
 import logging
 import os
-
-from psycopg2.extras import Json
 
 from lakebase import tracing_db
 
@@ -59,7 +58,7 @@ INSERT_SQL = f"""
     INSERT INTO {TABLE}
         (session_id, tool_name, arguments, status, symbol, summary,
          error_message, duration_ms)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s)
 """
 
 
@@ -101,7 +100,13 @@ def record_call(
             (
                 session_id,
                 tool_name,
-                Json(arguments),
+                # Serialised here and cast in the SQL rather than handed to a
+                # driver adapter: the MCP server writes through pg8000, which
+                # has no psycopg2.extras.Json and stringifies the wrapper into
+                # something Postgres rejects as "invalid input syntax for type
+                # json". Plain text plus ::jsonb works on both drivers, and this
+                # file is shared with the dashboard, which runs psycopg2.
+                json.dumps(arguments, default=str),
                 status,
                 symbol,
                 summary,

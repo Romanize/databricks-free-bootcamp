@@ -1,7 +1,7 @@
 """
 Net-worth MCP server (capstone).
 
-A FastMCP server exposing sixteen tools over MCP streamable HTTP, registered in
+A FastMCP server exposing seventeen tools over MCP streamable HTTP, registered in
 Databricks as an external MCP server and used by an Agent Bricks agent. Same
 shape as homework 3's weather MCP server, with a portfolio behind it.
 
@@ -69,6 +69,18 @@ DEFAULT_SENTIMENT_DAYS = 30
 # A report older than this is stale enough that the agent should say so before
 # quoting it. Matches the app's "time for a new reading" banner.
 REPORT_STALE_DAYS = int(os.environ.get("REPORT_STALE_DAYS", 30))
+
+# Attached to the tools whose result the net worth app can draw. The app watches
+# the stream for these tool names and renders the chart itself from the numbers
+# below, so the agent must not try to draw one in text - and must not read the
+# series out point by point either, because the user is already looking at it.
+# Harmless in the Playground, where there is no chart: it is a statement about
+# the client, not an instruction to produce anything.
+CHART_NOTE = (
+    "The net worth app draws this result as a chart for the user automatically. "
+    "Describe what it shows and what to do about it - do not list every point "
+    "and do not attempt ASCII art."
+)
 
 
 class ToolError(Exception):
@@ -298,6 +310,7 @@ def get_holdings_breakdown(group_by: str = "type", ctx: Context | None = None) -
             # Stated as a fact the agent can quote rather than a judgement. The
             # tool does not decide what "too concentrated" means.
             "largest_share_percent": largest["percent"] if largest else None,
+            "chart": CHART_NOTE,
             "_summary": f"{len(groups)} groups by {group_by}, total {total:,.2f}",
         }
 
@@ -342,6 +355,7 @@ def get_networth_history(monthly: bool = True, limit: int = 24, ctx: Context | N
                 for point in points
             ],
             "change_over_window": round(change, 2),
+            "chart": CHART_NOTE,
             "note": (
                 "Monthly points are the last report submitted in each month. "
                 "Reports are irregular, so gaps are gaps in reporting, not in value."
@@ -620,6 +634,7 @@ def get_investment_plan_projection(points: str = "yearly", ctx: Context | None =
 
         result = projections.project(plan, starting_value, points=points)
         result["plan_id"] = plan["id"]
+        result["chart"] = CHART_NOTE
         result["starting_value_source"] = (
             f"net worth report {_iso(report['report_date'])}" if report
             else "no report yet - projected from zero"
@@ -637,6 +652,136 @@ def get_investment_plan_projection(points: str = "yearly", ctx: Context | None =
         return result
 
     return _run("get_investment_plan_projection", {"points": points}, work, ctx)
+
+
+
+@mcp.tool
+def project_scenario(
+    years: int,
+    goal_amount: float | None = None,
+    starting_value: float | None = None,
+    expected_annual_rate: float = 0.07,
+    monthly_contribution: float = 0,
+    annual_contribution: float = 0,
+    expected_inflation: float = 0.03,
+    name: str = "Scenario",
+    ctx: Context | None = None,
+) -> dict:
+    """
+    Project a what-if that is NOT saved anywhere, and solve what it would take.
+
+    Use this for hypotheticals - "I am 32 with $200k, what would it take to have
+    $2M by 40?", "what if I put in $3k a month instead?", "what if returns are
+    only 5%?". Nothing is written to the database, so you never need permission
+    to run it and you never need to create a plan just to answer a question.
+    Use create_investment_plan only when the user asks to keep the scenario.
+
+    Args:
+        years: horizon in years, 1-80. For "retire at 40 and I am 32", that is 8.
+        goal_amount: the target in USD. Give it whenever the user named one -
+            it is what makes the answer a number instead of a curve.
+        starting_value: USD to start from. Leave it out to start from the user's
+            latest net worth report.
+        expected_annual_rate: as a DECIMAL - 0.07 means 7%. Defaults to 0.07.
+        monthly_contribution: USD added every month in this scenario.
+        annual_contribution: USD added once a year on top.
+        expected_inflation: as a decimal, defaults to 0.03.
+        name: a label for the chart, e.g. "Retire at 40".
+
+    Returns the same nominal / real / contributed series as the plan projection,
+    plus `required_monthly_contribution`: the smallest monthly amount that
+    actually reaches the goal. Answer with that number - "you would need about
+    $X a month" is the answer to "what can I do", where a curve is not.
+
+    You must state every value in `assumptions`, because those are the ones the
+    user did not give you and the answer moves a long way when they are wrong.
+    """
+
+    def work():
+        if starting_value is not None and _float(starting_value, 0) < 0:
+            raise ToolError("starting_value cannot be negative.")
+
+        assumptions = []
+        if starting_value is None:
+            report = schema.latest_report()
+            if not report:
+                raise NoData(
+                    "No starting value was given and no net worth report exists "
+                    "yet. Ask the user what they are starting from, or pass "
+                    "starting_value explicitly."
+                )
+            start = _float(report["total_value"], 0) or 0.0
+            source = f"net worth report {_iso(report['report_date'])}"
+        else:
+            start = _float(starting_value, 0) or 0.0
+            source = "given by the user"
+
+        plan = {
+            "name": (name or "Scenario").strip() or "Scenario",
+            "goal_amount": _float(goal_amount),
+            "expected_annual_rate": _float(expected_annual_rate, 0.07),
+            "years": _clamp(years, 10, 1, projections.MAX_YEARS),
+            "expected_inflation": _float(expected_inflation, 0.03),
+            "monthly_contribution": max(_float(monthly_contribution, 0) or 0.0, 0.0),
+            "annual_contribution": max(_float(annual_contribution, 0) or 0.0, 0.0),
+        }
+        if plan["goal_amount"] is not None and plan["goal_amount"] <= 0:
+            raise ToolError("goal_amount must be greater than zero.")
+
+        # Only the ones the caller did not set: an assumption the user made
+        # themselves is not an assumption, and listing it back as one reads as
+        # though the tool invented it.
+        if expected_annual_rate == 0.07:
+            assumptions.append("7% expected annual return")
+        if expected_inflation == 0.03:
+            assumptions.append("3% annual inflation")
+        assumptions.append(f"starting value {start:,.0f} ({source})")
+
+        result = projections.project(plan, start)
+        result["saved"] = False
+        result["starting_value_source"] = source
+        result["assumptions"] = assumptions
+        result["chart"] = CHART_NOTE
+
+        # The point of the whole tool for a "what would it take" question. Both
+        # are given because they are different answers: hitting $2M of 2034
+        # dollars is a much smaller ask than $2M of today's.
+        if plan["goal_amount"]:
+            needed = projections.required_monthly_contribution(plan, start)
+            needed_real = projections.required_monthly_contribution(plan, start, real=True)
+            result["required_monthly_contribution"] = needed
+            result["required_monthly_contribution_real"] = needed_real
+            result["required_note"] = (
+                "Monthly contribution needed to reach the goal within the "
+                "horizon. '_real' reaches it in today's money, which is the "
+                "honest target for a retirement number. null means the goal is "
+                "out of reach at these assumptions no matter the contribution - "
+                "say so, and suggest a longer horizon or a smaller goal."
+            )
+
+        result["_summary"] = (
+            f"{plan['name']}: {start:,.0f} -> {result['final_nominal']:,.0f} "
+            f"nominal over {plan['years']}y"
+            + (
+                f", needs {result['required_monthly_contribution']:,.0f}/mo"
+                if plan["goal_amount"] and result.get("required_monthly_contribution") is not None
+                else ""
+            )
+        )
+        return result
+
+    return _run(
+        "project_scenario",
+        {
+            "years": years, "goal_amount": goal_amount, "starting_value": starting_value,
+            "expected_annual_rate": expected_annual_rate,
+            "monthly_contribution": monthly_contribution,
+            "annual_contribution": annual_contribution,
+            "expected_inflation": expected_inflation, "name": name,
+        },
+        work,
+        ctx,
+    )
 
 
 # ----------------------------------------------------------------------- news

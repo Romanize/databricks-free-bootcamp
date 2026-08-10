@@ -28,6 +28,7 @@ the Agent Bricks agent.
     POST   /api/trades/<id>/reject
     GET    /api/broker                  Alpaca account and positions
     GET    /api/chat/status             whether the agent endpoint is configured
+    GET    /api/chat/suggestions        agent-written starter questions
     POST   /api/chat                    forward a conversation to the agent
     POST   /api/chat/stream             the same, streamed back as SSE
     GET    /healthz
@@ -829,6 +830,22 @@ def broker():
 @app.route("/api/chat/status")
 def chat_status():
     return jsonify(agent_chat.status())
+
+
+@app.route("/api/chat/suggestions")
+def chat_suggestions():
+    """
+    Starter questions for the chat tab, written by the agent.
+
+    Nothing here is canned: if the agent cannot answer, the tab says so and
+    offers a retry rather than falling back to a fixed list. `refresh=1` skips
+    the cache, which is what the little refresh button next to the chips sends.
+    """
+    refresh = request.args.get("refresh") in ("1", "true", "yes")
+    try:
+        return jsonify(agent_chat.suggestions(refresh=refresh))
+    except agent_chat.ChatError as err:
+        return jsonify({"error": str(err), "suggestions": []}), 502
 
 
 @app.route("/api/chat", methods=["POST"])

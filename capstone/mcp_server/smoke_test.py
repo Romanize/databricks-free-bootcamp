@@ -159,6 +159,11 @@ def build_cases() -> list[tuple[str, dict, str]]:
         ("get_networth_history", {"monthly": False}, "success" if has_report else "no_data"),
         ("get_investment_plan", {}, "success" if has_plan else "no_data"),
         ("get_investment_plan_projection", {}, "success" if has_plan else "no_data"),
+        # A what-if writes nothing, so it answers on an empty database too.
+        ("project_scenario", {"years": 8, "goal_amount": 2000000,
+                              "starting_value": 200000}, "success"),
+        ("project_scenario", {"years": 20, "starting_value": 0,
+                              "monthly_contribution": 1500}, "success"),
         ("search_ticker_news", {"query": "earnings beat and guidance"},
          "success" if has_news else "no_data"),
         ("search_ticker_news", {"query": "earnings", "symbol": "AAPL", "top_k": 3},
@@ -190,6 +195,13 @@ def build_cases() -> list[tuple[str, dict, str]]:
             "name": "Nonsense", "goal_amount": 1000,
             "expected_annual_rate": 9.0, "years": 10,
         }, "error"),
+        # Out of reach at any contribution: the tool must say so, not solve to a
+        # number, and it is still a successful answer.
+        ("project_scenario", {"years": 1, "goal_amount": 1e12,
+                              "starting_value": 1000}, "success"),
+        ("project_scenario", {"years": 8, "goal_amount": -5,
+                              "starting_value": 1000}, "error"),
+        ("project_scenario", {"years": 8, "starting_value": -1}, "error"),
         ("update_investment_plan", {"plan_id": 999999, "goal_amount": 1}, "error"),
         ("activate_investment_plan", {"plan_id": 999999}, "error"),
     ]

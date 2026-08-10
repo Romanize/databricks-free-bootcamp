@@ -17,17 +17,6 @@ const charts = {};
 let chatHistory = [];
 let draftLines = [];
 
-// Shown on the Chat tab as clickable openers. These are the same prompts the
-// agent's system prompt tells it to offer, kept here so a new user sees what
-// the assistant is actually for instead of an empty box.
-const CHAT_SUGGESTIONS = [
-  "Do I have an investment plan? Help me set one up.",
-  "Review my investment plan - am I on track?",
-  "What are people saying about my holdings?",
-  "What is my net worth and how is it split up?",
-  "Which of my holdings has the worst news sentiment?",
-];
-
 // ------------------------------------------------------------------ plumbing
 
 async function api(path, options = {}) {
@@ -892,14 +881,81 @@ async function loadChat() {
   const stored = localStorage.getItem("capstone-auto-approve");
   autoApprove.checked = stored === null ? Boolean(status.auto_approve) : stored === "1";
 
-  document.getElementById("chat-suggestions").innerHTML = status.configured
-    ? CHAT_SUGGESTIONS.map(
-        (text) => `<button class="chip" type="button" data-suggest="${escapeHtml(text)}">${escapeHtml(text)}</button>`,
-      ).join("")
-    : "";
+  if (status.configured) loadSuggestions();
+  else suggestionBox.innerHTML = "";
 }
 
-document.getElementById("chat-suggestions").addEventListener("click", (event) => {
+// ------------------------------------------------------- agent suggestions
+//
+// The openers are not a list in this file. The agent writes them when the tab
+// opens, having looked at the actual holdings, watchlist and plan first, so a
+// portfolio holding NVDA is offered questions about NVDA. The server caches
+// them, so switching tabs does not spend a turn every time. There is
+// deliberately no canned fallback: if the agent cannot answer, the tab says so
+// and offers a retry, rather than passing off a fixed list as its idea.
+
+const suggestionBox = document.getElementById("chat-suggestions");
+let suggestionsPending = false;
+
+// The sparkle and the violet tint are the whole tell: these came from the
+// model, not from the app.
+const AI_NOTE = (text, busy) =>
+  `<p class="ai-note"><span class="spark" aria-hidden="true">&#10024;</span> ${text}
+   <button type="button" class="ai-refresh" data-suggest-refresh="1"
+           title="Ask the agent for new questions" ${busy ? "disabled" : ""}>&#8635;</button></p>`;
+
+function renderSuggestions(state, payload) {
+  if (state === "loading") {
+    // Ghost chips rather than a spinner: the row keeps its height, so the chat
+    // log below does not jump when the real questions land.
+    const ghosts = ["13rem", "17rem", "10rem", "15rem"]
+      .map((width) => `<span class="chip ai ghost" style="width:${width}"></span>`)
+      .join("");
+    suggestionBox.innerHTML = AI_NOTE("Your agent is thinking of some questions&hellip;", true) +
+      `<div class="chips">${ghosts}</div>`;
+    return;
+  }
+
+  if (state === "error") {
+    suggestionBox.innerHTML = AI_NOTE(
+      `Could not think of any questions right now &mdash; ${escapeHtml(payload)}`,
+      false,
+    );
+    return;
+  }
+
+  suggestionBox.innerHTML =
+    AI_NOTE("Suggested by your agent, from what you actually hold", false) +
+    `<div class="chips">${payload
+      .map(
+        (text) =>
+          `<button class="chip ai" type="button" data-suggest="${escapeHtml(text)}">${escapeHtml(text)}</button>`,
+      )
+      .join("")}</div>`;
+}
+
+async function loadSuggestions(refresh = false) {
+  if (suggestionsPending) return;
+  suggestionsPending = true;
+  renderSuggestions("loading");
+  try {
+    const body = await api(`/api/chat/suggestions${refresh ? "?refresh=1" : ""}`);
+    renderSuggestions("ok", body.suggestions || []);
+  } catch (err) {
+    // Kept inside the suggestion row on purpose. Openers are a nicety; failing
+    // to write them should not raise the page-wide error banner as if the chat
+    // itself were broken, because it is not.
+    renderSuggestions("error", err.message);
+  } finally {
+    suggestionsPending = false;
+  }
+}
+
+suggestionBox.addEventListener("click", (event) => {
+  if (event.target.closest("[data-suggest-refresh]")) {
+    loadSuggestions(true);
+    return;
+  }
   const text = event.target.dataset.suggest;
   if (!text) return;
   document.getElementById("chat-input").value = text;
@@ -950,19 +1006,210 @@ async function streamChat(body, onEvent) {
   }
 }
 
-// The tools the agent used for this turn, shown above its answer. Without this
-// the whole tool loop - which is most of the wait - is invisible, and a slow
-// answer is indistinguishable from a stuck one.
-function toolTrail(message) {
-  if (!message.tools || !message.tools.length) return "";
-  const chips = message.tools
-    .map(
-      (tool) =>
-        `<span class="tool ${tool.status}">${tool.status === "done" ? "\u2713" : "\u2699"} ${escapeHtml(tool.name)}</span>`,
-    )
-    .join("");
-  return `<div class="tool-trail">${chips}</div>`;
+/*
+ * The chat log is built incrementally rather than re-rendered from one big
+ * template string, because a turn is now a list of BLOCKS in the order the
+ * stream produced them - text, a tool row, a chart - instead of a strip of tool
+ * chips above a paragraph.
+ *
+ * Two reasons that ordering matters. A tool shown where it was actually called
+ * reads as the agent working ("let me check" / tool / what it found) instead of
+ * as a summary bolted on top of an answer that was already written. And it is
+ * what puts a chart in front of the paragraph explaining it.
+ *
+ * Incremental is not a nicety here: a Chart.js canvas replaced by an innerHTML
+ * rebuild is destroyed, so re-rendering the whole log on every text delta would
+ * tear down and redraw every chart dozens of times a turn. Each message and
+ * each block therefore keeps its own element, and only its contents change.
+ */
+
+let chatChartSeq = 0;
+
+/** Everything the agent said this turn - the part that goes back as history. */
+function messageText(message) {
+  return (message.blocks || [])
+    .filter((block) => block.kind === "text")
+    .map((block) => block.text)
+    .join("\n\n")
+    .trim();
 }
+
+/** The text block currently being written into, opening one if there is none. */
+function openTextBlock(message) {
+  const last = message.blocks[message.blocks.length - 1];
+  if (last && last.kind === "text" && last.open) return last;
+  const block = { kind: "text", text: "", open: true };
+  message.blocks.push(block);
+  return block;
+}
+
+/** Drop the "thinking" placeholder as soon as the turn has anything real. */
+function clearStatus(message) {
+  if (message.blocks.length === 1 && message.blocks[0].kind === "status") message.blocks.pop();
+}
+
+// ------------------------------------------------------ charts in the answer
+
+/*
+ * Charts are built from the TOOL RESULT, never from the agent's prose. The
+ * server forwards the payload of a handful of chart-shaped tools alongside the
+ * "done" frame (see CHART_TOOLS in agent_chat.py), so the line on the screen is
+ * drawn from the same numbers the agent was reasoning over. Asking the model to
+ * emit chart data in its reply would put a hallucinated series one plausible
+ * paragraph away, which is exactly the failure this whole project is built to
+ * avoid.
+ *
+ * A builder returns {title, caption, config} or null - null when the result is
+ * too thin to plot, e.g. a one-point history.
+ */
+
+function projectionCaption(result) {
+  const goal = result.goal_reached || {};
+  const parts = [
+    `After ${result.years}y: ${money(result.final_nominal)} nominal, ` +
+      `${money(result.final_real)} in today's money.`,
+  ];
+
+  if (result.goal_amount && "required_monthly_contribution" in result) {
+    // The scenario tool solved for it: this is the answer to "what would it take".
+    const needed = result.required_monthly_contribution;
+    const neededReal = result.required_monthly_contribution_real;
+    if (needed === null || needed === undefined) {
+      parts.push(`${money(result.goal_amount)} is out of reach at these assumptions.`);
+    } else {
+      parts.push(
+        `Reaching ${money(result.goal_amount)} needs ${money(needed)}/mo` +
+          (neededReal ? ` - ${money(neededReal)}/mo to get there in today's money.` : "."),
+      );
+    }
+  } else if (goal.goal_set) {
+    parts.push(
+      goal.reached_nominal
+        ? `Goal ${money(goal.goal_amount)} reached in ${goal.reached_nominal_in_years}y nominal.`
+        : `Goal ${money(goal.goal_amount)} is not reached inside the horizon.`,
+    );
+  }
+
+  if (result.assumptions && result.assumptions.length) {
+    parts.push(`Assumes ${result.assumptions.join(", ")}.`);
+  }
+  return parts.join(" ");
+}
+
+function projectionChatChart(result) {
+  const series = result.series || [];
+  if (series.length < 2) return null;
+
+  const goal = result.goal_reached || {};
+  const datasets = [
+    { label: "Nominal", data: series.map((p) => p.nominal), tension: 0.2, pointRadius: 0 },
+    { label: "Today's money", data: series.map((p) => p.real), tension: 0.2, pointRadius: 0 },
+    {
+      label: "Contributed",
+      data: series.map((p) => p.contributed),
+      tension: 0.2,
+      pointRadius: 0,
+      borderDash: [5, 5],
+    },
+  ];
+  if (goal.goal_set) {
+    datasets.push({
+      label: "Goal",
+      data: series.map(() => goal.goal_amount),
+      borderDash: [2, 4],
+      pointRadius: 0,
+    });
+  }
+
+  return {
+    title: `${result.plan_name || "Projection"} - ${money(result.starting_value)} over ${result.years} years`,
+    caption: projectionCaption(result),
+    config: {
+      type: "line",
+      data: { labels: series.map((p) => `Y${Math.round(p.year)}`), datasets },
+      options: chatChartOptions({ interaction: { mode: "index", intersect: false } }),
+    },
+  };
+}
+
+function breakdownChatChart(result) {
+  const groups = (result.groups || []).filter((group) => group.value);
+  if (!groups.length) return null;
+  return {
+    title: `Allocation by ${result.group_by} - ${money(result.total_value)}`,
+    caption: `From the net worth report of ${date(result.report_date)}.`,
+    config: {
+      type: "doughnut",
+      data: {
+        labels: groups.map((group) => group.group),
+        datasets: [{ data: groups.map((group) => group.value) }],
+      },
+      options: chatChartOptions(),
+    },
+  };
+}
+
+function historyChatChart(result) {
+  const points = result.points || [];
+  if (points.length < 2) return null;
+  return {
+    title: `Net worth, ${result.granularity}`,
+    caption: `${points.length} points, change ${money(result.change_over_window)} over the window.`,
+    config: {
+      type: "line",
+      data: {
+        labels: points.map((point) => date(point.date)),
+        datasets: [
+          { label: "Total", data: points.map((p) => p.total_value), tension: 0.2 },
+          { label: "Invested", data: points.map((p) => p.invested_value), tension: 0.2 },
+          { label: "Cash", data: points.map((p) => p.cash_value), tension: 0.2 },
+        ],
+      },
+      options: chatChartOptions({ interaction: { mode: "index", intersect: false } }),
+    },
+  };
+}
+
+/** Chart options for a chart living in a fixed-height box inside the log. */
+function chatChartOptions(extra = {}) {
+  return {
+    responsive: true,
+    // The wrapper sets the height; without this Chart.js keeps its own aspect
+    // ratio and overflows the box on a narrow window.
+    maintainAspectRatio: false,
+    plugins: { legend: { labels: { boxWidth: 12, font: { size: 10 } } } },
+    ...extra,
+  };
+}
+
+// Tool name -> builder. A tool missing from here simply gets its row and no
+// chart, which is the correct outcome for the twelve tools that answer in words.
+const CHAT_CHARTS = {
+  project_scenario: projectionChatChart,
+  get_investment_plan_projection: projectionChatChart,
+  get_holdings_breakdown: breakdownChatChart,
+  get_networth_history: historyChatChart,
+};
+
+function drawChatChart(host, block) {
+  host.innerHTML = `
+    <div class="chat-chart-title">${escapeHtml(block.spec.title)}</div>
+    <div class="chat-chart-box"><canvas id="${block.canvasId}"></canvas></div>
+    ${block.spec.caption ? `<p class="muted">${escapeHtml(block.spec.caption)}</p>` : ""}`;
+  draw(block.canvasId, block.spec.config);
+}
+
+/** Forget the Chart instances belonging to the log - used when it is cleared. */
+function destroyChatCharts() {
+  Object.keys(charts)
+    .filter((id) => id.startsWith("chat-chart-"))
+    .forEach((id) => {
+      charts[id].destroy();
+      delete charts[id];
+    });
+}
+
+// ------------------------------------------------------------------ rendering
 
 // The agent asked permission to run a tool. Shown with the arguments visible,
 // because "may I run get_holdings_breakdown?" is not a decision anyone can make
@@ -986,59 +1233,161 @@ function approvalCard(message) {
     </div></div>`;
 }
 
+function renderBlocks(message, host) {
+  message.blocks.forEach((block, index) => {
+    let el = host.children[index];
+    if (!el) {
+      el = document.createElement("div");
+      host.appendChild(el);
+    }
+    // An element is only ever reused for the same KIND of block. Inserting a
+    // chart shifts everything after it by one, and a canvas quietly reclassified
+    // as a paragraph would leave a live Chart bound to a node nobody can see.
+    if (el.dataset.kind !== block.kind) {
+      el.dataset.kind = block.kind;
+      el.innerHTML = "";
+      delete el.dataset.drawn;
+    }
+
+    if (block.kind === "text") {
+      el.className = "text";
+      el.innerHTML =
+        escapeHtml(block.text) +
+        (block.open && message.streaming ? '<span class="cursor">▍</span>' : "");
+    } else if (block.kind === "status") {
+      el.className = "text muted";
+      el.textContent = block.text;
+    } else if (block.kind === "tool") {
+      el.className = "tool-row";
+      el.innerHTML = `<span class="tool ${block.status}">${
+        block.status === "done" ? "✓" : "⚙"
+      } ${escapeHtml(block.name)}</span>`;
+    } else if (block.kind === "chart") {
+      el.className = "chat-chart";
+      // Drawn once. Re-running this on every delta would rebuild the canvas
+      // mid-stream and throw away the chart that is already on screen.
+      if (!el.dataset.drawn) {
+        el.dataset.drawn = "1";
+        drawChatChart(el, block);
+      }
+    }
+  });
+
+  while (host.children.length > message.blocks.length) host.lastChild.remove();
+}
+
 function renderChat() {
   const log = document.getElementById("chat-log");
-  log.innerHTML = chatHistory
-    .map(
-      (message) =>
-        `<div class="message ${message.role}"><span class="who">${message.role}</span>
-         ${toolTrail(message)}
-         <div>${escapeHtml(message.content)}${message.streaming ? '<span class="cursor">\u258d</span>' : ""}</div>
-         ${approvalCard(message)}</div>`,
-    )
-    .join("");
+  const wanted = new Set();
+
+  chatHistory.forEach((message) => {
+    if (!message.blocks) {
+      // A user turn, or an old assistant turn restored from plain text.
+      message.blocks = message.content ? [{ kind: "text", text: message.content }] : [];
+    }
+    if (!message.el || message.el.parentNode !== log) {
+      message.el = document.createElement("div");
+      message.el.className = `message ${message.role}`;
+      message.el.innerHTML = `<span class="who">${escapeHtml(message.role)}</span>
+        <div class="blocks"></div><div class="approval-slot"></div>`;
+      log.appendChild(message.el);
+    }
+    wanted.add(message.el);
+    renderBlocks(message, message.el.querySelector(".blocks"));
+    message.el.querySelector(".approval-slot").innerHTML = approvalCard(message);
+  });
+
+  // A turn dropped from the history (a failed one) takes its element with it.
+  Array.from(log.children).forEach((el) => {
+    if (!wanted.has(el)) el.remove();
+  });
   log.scrollTop = log.scrollHeight;
+}
+
+/**
+ * Fold one tool event into the turn's blocks.
+ *
+ * A running tool closes the paragraph above it: whatever the agent says next is
+ * about what the tool found, so it belongs in its own row underneath rather than
+ * glued onto the sentence that introduced the call.
+ */
+function handleToolEvent(message, event) {
+  clearStatus(message);
+  message.blocks.forEach((block) => {
+    if (block.kind === "text") block.open = false;
+  });
+
+  // Matched on the call id so the result frame ticks off the call that started
+  // it instead of adding a second row.
+  let row = message.blocks.find((block) => block.kind === "tool" && block.id === event.id);
+  if (row) {
+    row.status = event.status;
+    if (event.name) row.name = event.name;
+  } else {
+    row = { kind: "tool", id: event.id, name: event.name, status: event.status };
+    message.blocks.push(row);
+  }
+
+  if (!event.result) return;
+  const builder = CHAT_CHARTS[event.name];
+  const spec = builder && builder(event.result);
+  if (!spec || message.blocks.some((block) => block.kind === "chart" && block.id === event.id)) return;
+
+  // Directly under the row that produced it, which is also directly above the
+  // paragraph the agent is about to write about it.
+  message.blocks.splice(message.blocks.indexOf(row) + 1, 0, {
+    kind: "chart",
+    id: event.id,
+    spec,
+    canvasId: `chat-chart-${++chatChartSeq}`,
+  });
 }
 
 // One agent turn, whether it starts from a question or resumes a paused one.
 async function runChat(body) {
-  const thinking = { role: "assistant", content: "…", tools: [] };
-  chatHistory.push(thinking);
+  const turn = { role: "assistant", content: "", blocks: [{ kind: "status", text: "…" }] };
+  chatHistory.push(turn);
   renderChat();
 
   try {
     await streamChat(body, (event) => {
-        if (event.type === "approval") {
-          // The turn stops here until the user decides. `state` is the agent's
-          // paused conversation, kept client-side and handed straight back.
-          thinking.approval = { requests: event.requests, state: event.state };
-        } else if (event.type === "tool") {
-          // Matched on the call id so the result frame ticks off the call that
-          // started it instead of adding a second chip.
-          const existing = thinking.tools.find((t) => t.id === event.id);
-          if (existing) existing.status = event.status;
-          else thinking.tools.push({ id: event.id, name: event.name, status: event.status });
-        } else if (event.type === "delta" && event.text) {
-          // First piece replaces the placeholder rather than appending to it.
-          thinking.content = thinking.streaming ? thinking.content + event.text : event.text;
-          thinking.streaming = true;
-        } else {
-          return;
-        }
-        renderChat();
+      if (event.type === "approval") {
+        // The turn stops here until the user decides. `state` is the agent's
+        // paused conversation, kept client-side and handed straight back.
+        turn.approval = { requests: event.requests, state: event.state };
+        clearStatus(turn);
+      } else if (event.type === "tool") {
+        handleToolEvent(turn, event);
+      } else if (event.type === "delta" && event.text) {
+        clearStatus(turn);
+        openTextBlock(turn).text += event.text;
+        turn.streaming = true;
+        turn.content = messageText(turn);
+      } else {
+        return;
+      }
+      renderChat();
     });
-    delete thinking.streaming;
+
+    delete turn.streaming;
     // Pieces arrive with their own spacing; the last one usually ends in one.
-    thinking.content = thinking.content.trim();
-    if (!thinking.content || thinking.content === "…") {
-      // A turn that only asked permission has no answer in it yet, and saying
-      // "empty reply" over an approval card would be nonsense.
-      thinking.content = thinking.approval ? "" : "(the agent returned an empty reply)";
+    turn.blocks.forEach((block) => {
+      if (block.kind !== "text") return;
+      block.text = block.text.trim();
+      block.open = false;
+    });
+    turn.blocks = turn.blocks.filter((block) => block.kind !== "text" || block.text);
+    turn.content = messageText(turn);
+
+    // A turn that only asked permission, or only drew a chart, has no answer in
+    // it yet - and saying "empty reply" over an approval card would be nonsense.
+    if (!turn.content && !turn.approval && !turn.blocks.length) {
+      turn.blocks.push({ kind: "text", text: "(the agent returned an empty reply)" });
     }
   } catch (err) {
     // Drop the placeholder rather than leaving a fake turn in the history that
     // the next request would forward back to the agent.
-    chatHistory = chatHistory.filter((m) => m !== thinking);
+    chatHistory = chatHistory.filter((m) => m !== turn);
     showError(err.message);
   }
   renderChat();
@@ -1046,10 +1395,15 @@ async function runChat(body) {
   Promise.all([loadTradeQueue(), loadStats()]).catch(() => {});
 }
 
+
 function askAgent(text) {
   chatHistory.push({ role: "user", content: text });
   return runChat({
-    messages: chatHistory.filter((m) => m.content),
+    // Only what was said, never the rendering state: a turn also carries its
+    // blocks and its DOM element, and neither is any business of the agent's.
+    messages: chatHistory
+      .filter((message) => message.content)
+      .map((message) => ({ role: message.role, content: message.content })),
     auto_approve: autoApprove.checked,
   });
 }
@@ -1101,6 +1455,9 @@ document.getElementById("chat-log").addEventListener("click", (event) => {
 });
 
 document.getElementById("chat-clear").addEventListener("click", () => {
+  // Chart.js keeps its instances alive by canvas id, so dropping the history
+  // without this leaks one chart per answer that ever drew one.
+  destroyChatCharts();
   chatHistory = [];
   renderChat();
 });

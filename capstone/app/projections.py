@@ -172,3 +172,55 @@ def _goal_summary(goal: float, nominal_month, real_month, horizon_months: int) -
             else None
         ),
     }
+
+
+# ------------------------------------------------------------------- solving
+
+# Nobody contributes a million dollars a month. Past this the answer is "the
+# goal is not reachable at these assumptions", which is more useful than a
+# number that is technically correct and practically absurd.
+MAX_SOLVE_MONTHLY = 1_000_000.0
+
+
+def required_monthly_contribution(plan: dict, starting_value: float,
+                                  *, real: bool = False) -> float | None:
+    """
+    The smallest monthly contribution that reaches the plan's goal by the end
+    of its horizon.
+
+    Returns 0.0 when the goal is already reached without contributing, and None
+    when no contribution under MAX_SOLVE_MONTHLY gets there (or no goal is set).
+    `real` solves against today's money instead of the nominal balance, which is
+    the honest target for a retirement number.
+
+    Bisection rather than the annuity closed form on purpose: the annual
+    contribution lands once every twelfth month and the closed form does not
+    model that, so a formula here would disagree with the curve drawn next to
+    it. The thing being solved has to be the thing being called.
+    """
+    goal = _as_float(plan.get("goal_amount"))
+    if not goal:
+        return None
+
+    key = "final_real" if real else "final_nominal"
+
+    def final_with(monthly: float) -> float:
+        return project({**plan, "monthly_contribution": monthly}, starting_value)[key]
+
+    if final_with(0.0) >= goal:
+        return 0.0
+    if final_with(MAX_SOLVE_MONTHLY) < goal:
+        return None
+
+    low, high = 0.0, MAX_SOLVE_MONTHLY
+    # 40 halvings takes a $1M bracket to well under a cent; the loop is bounded
+    # rather than run to convergence so a pathological input cannot hang a tool.
+    for _ in range(40):
+        middle = (low + high) / 2
+        if final_with(middle) >= goal:
+            high = middle
+        else:
+            low = middle
+    # The high end of the bracket, so the answer always reaches the goal rather
+    # than landing a dollar short of it.
+    return round(high, 2)

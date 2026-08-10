@@ -21,7 +21,7 @@ a tracing dashboard (day 3) — into one system, in its own isolated space.
                                     │ MCP (streamable HTTP)
                                     ▼
                  ┌──────────────────────────────────────────────────────────┐
-                 │  App 2  mcp_server/   16 tools                            │
+                 │  App 2  mcp_server/   17 tools                            │
                  │  execute_trade ──── needs the key ────► Alpaca (paper)    │
                  └────────┬──────────────────────────────┬──────────────────┘
                           │ SQL + pgvector               │ one row per call
@@ -242,9 +242,40 @@ description runs 300–1500 characters, so 800/100 genuinely splits the longer o
 into 2–3 overlapping windows. Titles go first in `embed_text` because a headline
 is the densest sentence in a news item and survives every chunk boundary.
 
+## What the chat tab shows
+
+The log is a stream of **blocks**, in the order the agent produced them: text, a
+tool row, a chart, more text. Tools used to be summarised as a strip of chips
+above the answer, which said what ran but nothing about *when* — an answer that
+had already been written appeared to be preceded by the work. Now a call shows up
+where it was made, so the tab reads as the agent working rather than as a
+receipt: "let me look at your plan", the tool, then what it found.
+
+Four tools also draw a chart inline — `project_scenario`,
+`get_investment_plan_projection`, `get_holdings_breakdown` and
+`get_networth_history`. **The chart is built from the tool's own payload, not
+from the agent's reply.** `agent_chat.py` forwards the result of those four tools
+(and only those, and only when `status` is `success`) down the SSE stream next to
+the "done" frame, and the browser plots it. The alternative — asking the model to
+emit the series in its answer — puts a hallucinated curve one plausible paragraph
+away, which is the exact failure the rest of this project is built to prevent.
+
+`project_scenario` exists for this. "I'm 32 with $200k and I want $2M by 40" is
+not a saved plan and should not become one, so the tool writes nothing, projects
+the horizon from the numbers in the sentence, and solves for the monthly
+contribution that actually reaches the goal — by bisecting the same
+`projections.project()` the chart is drawn from, rather than an annuity formula
+that would not model the annual contribution and would quietly disagree with the
+line next to it. The answer is the required contribution; the chart is the
+context for it.
+
+Because the log renders incrementally, the message and each block keep their own
+DOM element: a full `innerHTML` rebuild on every text delta would destroy and
+redraw every canvas dozens of times a turn.
+
 ## The MCP tools
 
-Sixteen, in four groups.
+Seventeen, in four groups.
 
 | Tool                             | What it does                                                                                        |
 | -------------------------------- | --------------------------------------------------------------------------------------------------- |
@@ -256,6 +287,7 @@ Sixteen, in four groups.
 | `update_investment_plan`         | Patches one; validates the _merged_ result, not just the patch.                                     |
 | `activate_investment_plan`       | Switches which plan is charted.                                                                     |
 | `get_investment_plan_projection` | Nominal **and** inflation-adjusted, with goal analysis.                                             |
+| `project_scenario`               | A what-if that saves nothing, and solves the contribution the goal needs.                           |
 | `search_ticker_news`             | Semantic search. The only embedding-backed tool.                                                    |
 | `get_ticker_sentiment`           | Stored sentiment, with article counts.                                                              |
 | `get_watchlist`                  | What is tracked — and therefore what news can exist.                                                |
@@ -290,6 +322,7 @@ agent that quietly answers from memory. `no_data` responses also carry a
 | Prices missing → holding excluded + warning            | A missing quote looking like a wipeout                   |
 | Article counts on every sentiment score                | A +1.0 from two articles reading as a signal             |
 | Real _and_ nominal on every projection                 | Inflation quietly doubling the apparent outcome          |
+| Chat charts built from the tool payload, not the reply | A hallucinated series drawn as if it were data           |
 | Tracing on every call, best-effort                     | A dead trace database breaking working answers           |
 
 ## Running it
@@ -409,6 +442,21 @@ schema (default `main.capstone_analytics`, a widget).
   Auto-approving is defensible here because `execute_trade` is still gated by a
   single-use key the user alone can mint on the Trades tab — the human stays in the loop
   by that key, not by this checkbox.
+
+  **The starter chips are written by the agent, not by the app.** Opening the tab calls
+  `GET /api/chat/suggestions`, which spends one turn asking the agent for a handful of
+  openers *after* it has looked at the holdings, watchlist, plan and sentiment — so the
+  questions name real tickers and offer to fix what is actually missing, and they change
+  as the portfolio does. The agent replies with a bare JSON array (the one place its
+  prompt allows raw JSON, since the reply is parsed into buttons and never shown as
+  text) and the app caches it for `CAPSTONE_CHAT_SUGGESTION_TTL` seconds so tab
+  switching does not cost a turn each time; the ↻ beside the chips forces a fresh set.
+  There is no hardcoded fallback list on purpose — if the agent cannot answer, the row
+  says so and offers a retry rather than passing off canned questions as its own, and
+  the failure stays inside the chip row instead of raising the page-wide error banner.
+  Generated chips are marked with a sparkle and a violet tint, the one hue the
+  stylesheet does not use for anything meaningful, so it is never ambiguous which text
+  on the page came from the model.
 
 ## Known limitations / what I'd do next
 
