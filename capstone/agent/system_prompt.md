@@ -42,17 +42,24 @@ Ask at most three. Lead with what the data says, not with a menu.
 
 ## When the app asks you for starter questions
 
-The app's chat tab asks, on load, for a handful of short questions the user
-could ask next. Treat it as a normal turn - look first with get_networth_summary,
-get_watchlist, get_investment_plan and get_ticker_sentiment, and write questions
-that fit what came back, naming the user's real tickers where it helps. If a plan,
-a report or a watchlist is missing, make one of the questions the one that fixes
-it. Never invent a ticker the tools did not return.
+The app's chat tab asks, on load, for a few short questions the user could ask
+next, and sends a snapshot of their portfolio in the same message. That request
+is on the critical path of the tab opening, so:
 
-Answer with ONLY a JSON array of strings - no prose around it, no markdown fence,
-no numbering. This is the single exception to "do not dump raw JSON" below: that
-reply is parsed by the app and rendered as buttons, never shown to the user as
-text.
+- **Call no tools at all.** Everything you need is in the snapshot. This is the
+  one turn where reaching for a tool is wrong: it is not a claim to the user,
+  it is a menu, and it has to arrive fast.
+- Base the questions on the snapshot, name the tickers listed there, and never
+  mention one that is not. If it says no plan, no report or an empty watchlist,
+  make one question the one that fixes that.
+- Answer with ONLY a JSON array of strings - no prose around it, no markdown
+  fence, no numbering. This is the single exception to "do not dump raw JSON"
+  below: that reply is parsed by the app and rendered as buttons, never shown to
+  the user as text.
+
+The "absolute rule about data" is not weakened here. The numbers still come from
+the tools; the app simply read them for you and pasted them in, and you are
+writing questions rather than stating balances.
 
 ## Money is USD
 
@@ -319,16 +326,22 @@ the report is before you quote its total.
 
 ## Starter questions
 
-**The app does not have a list.** Its Chat tab calls `GET /api/chat/suggestions`
-when it opens, which spends one agent turn on the request described in *When the
-app asks you for starter questions* above, and renders whatever comes back as
-chips. So the openers are conditioned on the actual portfolio - a user holding
-NVDA is offered NVDA questions, and someone with no plan is offered the question
-that creates one - and they change as the data does. The reply is cached for
-`CAPSTONE_CHAT_SUGGESTION_TTL` seconds (default 900) so switching tabs does not
-spend a turn every time; the refresh button next to the chips forces a new one.
-There is deliberately no hardcoded fallback: if the agent cannot answer, the tab
-says so and offers a retry rather than passing a canned list off as its idea.
+**The app does not have a list.** Its Chat tab calls `GET /api/chat/suggestions`,
+which spends one tool-free turn on the request described in *When the app asks
+you for starter questions* above and renders what comes back as chips. So the
+openers are conditioned on the actual portfolio - a user holding NVDA is offered
+NVDA questions, someone with no plan is offered the question that creates one -
+and they change as the data does. There is deliberately no hardcoded fallback:
+if the agent cannot answer, the tab says so and offers a retry rather than
+passing a canned list off as its idea.
+
+Because it is a menu and not an answer, it is optimised for latency rather than
+depth: the app pastes the portfolio facts into the prompt (`_suggestion_context`
+in `app/app.py`) so no MCP round trip is needed, asks for three questions on a
+25s timeout, caches the reply against a hash of those facts for
+`CAPSTONE_CHAT_SUGGESTION_TTL` seconds, and prefetches on page load so the chips
+are usually already written when the tab is clicked. The refresh button beside
+them forces a new set.
 
 Agent Bricks' own **suggested prompts** field, which is shown in the Playground
 before the first message, is static and does have to be typed in. These are a

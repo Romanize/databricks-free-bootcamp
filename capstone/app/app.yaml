@@ -50,15 +50,20 @@ env:
   - name: CAPSTONE_CHAT_TOOL_ROUNDS
     value: "8"
   # The chat tab's starter questions are written by the agent, from the actual
-  # holdings, watchlist and plan - there is no hardcoded list. That costs a
-  # whole turn, so the answer is held for this many seconds and reused as the
-  # tab is opened and left; the refresh button beside the chips forces a new
-  # one regardless.
+  # holdings, watchlist and plan - there is no hardcoded list. The app pastes
+  # those facts into the prompt so the turn needs no tool calls, and the reply
+  # is cached against a hash of them: switching tabs is free, and adding a
+  # holding invalidates it. The refresh button beside the chips forces a new set.
   - name: CAPSTONE_CHAT_SUGGESTION_TTL
-    value: "900"
-  # How many of those questions to ask for.
+    value: "1800"
+  # How many questions to ask for. Kept small: they arrive sooner and a short
+  # row is easier to read than a long one.
   - name: CAPSTONE_CHAT_SUGGESTION_COUNT
-    value: "5"
+    value: "3"
+  # The chip row is not worth the full chat budget. Past this the row says it
+  # could not think of any and offers a retry, which beats a tab that looks stuck.
+  - name: CAPSTONE_CHAT_SUGGESTION_TIMEOUT
+    value: "25"
 
   # How many days before the "time for a new report" banner appears.
   - name: REPORT_STALE_DAYS

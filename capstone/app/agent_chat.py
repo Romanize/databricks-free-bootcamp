@@ -31,9 +31,11 @@ Nothing here can execute a trade. The agent's only trade tool is `propose_trade`
 which queues a row for the approval queue in this same app.
 """
 
+import hashlib
 import json
 import logging
 import os
+import threading
 import time
 
 import requests
@@ -269,7 +271,7 @@ def _parse_sse(body: str) -> dict | str:
 # -------------------------------------------------------------------- calling
 
 
-def _blocking(messages: list) -> dict:
+def _blocking(messages: list, *, timeout: int | None = None) -> dict:
     """
     One non-streamed call, used only when the endpoint will not stream.
 
@@ -285,10 +287,10 @@ def _blocking(messages: list) -> dict:
 
     try:
         response = requests.post(
-            url, headers=headers, json={"input": history}, timeout=TIMEOUT
+            url, headers=headers, json={"input": history}, timeout=timeout or TIMEOUT
         )
     except requests.Timeout:
-        raise ChatError(f"The agent did not answer within {TIMEOUT}s.") from None
+        raise ChatError(f"The agent did not answer within {timeout or TIMEOUT}s.") from None
     except requests.RequestException as err:
         raise ChatError(f"Could not reach the agent endpoint: {err}") from err
 
@@ -718,34 +720,60 @@ def ask(messages: list) -> dict:
 
 
 # ---------------------------------------------------------------- suggestions
+#
+# These are the chips the chat tab shows before the first message, and they are
+# on the critical path of opening that tab: nobody waits thirty seconds to be
+# told what they could ask. So this is deliberately the CHEAPEST turn in the
+# app - no tools, a small model prompt, three questions, a short timeout.
+#
+# The agent is not asked to look anything up. The app is already holding the
+# holdings, the watchlist, the plan and the last report, so it writes them into
+# the request as a short fact block. That is the whole latency story: a
+# tool-using turn is several round trips through the MCP server before a single
+# token is written, and it produced questions no better grounded than the facts
+# the app could have handed over for free.
 
-# How many starter questions the chat tab asks for.
-SUGGESTION_COUNT = int(os.environ.get("CAPSTONE_CHAT_SUGGESTION_COUNT", 5))
+# Three, not five: they arrive sooner and a shorter row is easier to read.
+SUGGESTION_COUNT = int(os.environ.get("CAPSTONE_CHAT_SUGGESTION_COUNT", 3))
 
-# Generating these is a whole agent turn - usually with a couple of tool calls
-# in it - so the result is held for a while. The chat tab is opened and left
-# several times in one sitting, and a portfolio does not change so fast that
-# fifteen-minute-old questions are wrong.
-SUGGESTION_TTL = int(os.environ.get("CAPSTONE_CHAT_SUGGESTION_TTL", 900))
+# The chip row is not worth the full 120s chat budget. If the agent is having a
+# slow day the row says so and offers a retry, which is a better outcome than a
+# tab that looks stuck.
+SUGGESTION_TIMEOUT = int(os.environ.get("CAPSTONE_CHAT_SUGGESTION_TIMEOUT", 25))
 
-# A starter chip has to fit on one line next to four others.
-SUGGESTION_MAX_CHARS = 110
+# Held between opens of the tab. The key is a hash of the fact block, so a new
+# holding or a fresh report invalidates it immediately, while merely switching
+# tabs does not.
+SUGGESTION_TTL = int(os.environ.get("CAPSTONE_CHAT_SUGGESTION_TTL", 1800))
 
-SUGGESTION_REQUEST = (
-    f"Suggest {SUGGESTION_COUNT} short questions I could ask you next about my "
-    "portfolio. First look at what I actually have - use your tools to check my "
-    "holdings, my watchlist, my investment plan and any recent news sentiment - "
-    "and write questions that fit that data, naming my real tickers where it "
-    "helps. If something is missing (no plan, no report, an empty watchlist), "
-    "make one of the questions the one that fixes it.\n\n"
-    "Reply with ONLY a JSON array of strings and nothing else: no prose before "
-    "or after, no markdown fence, no numbering. Each question must be under "
-    f"{SUGGESTION_MAX_CHARS} characters and written in the first person, as if "
-    "I were typing it to you."
-)
+# A starter chip has to fit on one line next to two others.
+SUGGESTION_MAX_CHARS = 90
 
-# {"at": monotonic seconds, "questions": [...]}
-_suggestion_cache: dict = {"at": 0.0, "questions": []}
+
+def _suggestion_request(context: str) -> str:
+    """The whole prompt: instructions plus the facts, so no tool call is needed."""
+    return (
+        f"Write {SUGGESTION_COUNT} short questions the user could ask you next.\n\n"
+        "DO NOT CALL ANY TOOLS. Everything you need is in the snapshot below, and "
+        "this request is on a timer - answer immediately from it.\n\n"
+        f"--- snapshot of their portfolio ---\n{context or 'No data yet.'}\n"
+        "--- end of snapshot ---\n\n"
+        "Base the questions on that snapshot: name their real tickers where it "
+        "helps, and never mention a ticker that is not listed above. If something "
+        "is missing (no plan, no report, an empty watchlist), make one question "
+        "the one that fixes it.\n\n"
+        "Reply with ONLY a JSON array of strings. No prose, no markdown fence, no "
+        f"numbering. Each question under {SUGGESTION_MAX_CHARS} characters, first "
+        "person, as if the user were typing it to you."
+    )
+
+
+# {"key": fact-block hash, "at": monotonic seconds, "questions": [...]}
+_suggestion_cache: dict = {"key": "", "at": 0.0, "questions": []}
+
+# Opening the chat tab and the page-load prefetch can ask at the same moment.
+# Without this they would each spend a turn to compute the same answer.
+_suggestion_lock = threading.Lock()
 
 
 def _parse_suggestions(reply: str) -> list:
@@ -787,45 +815,71 @@ def _parse_suggestions(reply: str) -> list:
 
     cleaned: list = []
     for question in questions:
-        question = " ".join(question.split())[:SUGGESTION_MAX_CHARS].strip()
-        if question and question not in cleaned:
+        question = " ".join(question.split()).strip()
+        # Truncating mid-sentence produces a chip that reads like a bug, so an
+        # over-long question is dropped rather than cut. Asking for three of
+        # them leaves room for one to be discarded.
+        if question and len(question) <= SUGGESTION_MAX_CHARS and question not in cleaned:
             cleaned.append(question)
     return cleaned[:SUGGESTION_COUNT]
 
 
-def suggestions(*, refresh: bool = False) -> dict:
-    """
-    Starter questions for the chat tab, written by the agent itself.
+def _cached(key: str) -> list:
+    """The held questions, if they are for this snapshot and still fresh."""
+    if _suggestion_cache["key"] != key or not _suggestion_cache["questions"]:
+        return []
+    if time.monotonic() - _suggestion_cache["at"] >= SUGGESTION_TTL:
+        return []
+    return list(_suggestion_cache["questions"])
 
-    Returns {"suggestions": [...], "generated_at": epoch, "cached": bool}.
-    Raises ChatError when the agent is not configured or could not answer - the
-    caller shows that instead of questions, because there is deliberately no
-    hardcoded list to show in its place.
+
+def _generate(context: str) -> list:
+    """One non-streamed call, no tool loop, short timeout."""
+    messages = [{"role": "user", "content": _suggestion_request(context)}]
+
+    # `_blocking`, not `ask()`: this turn is not supposed to use tools, so it
+    # does not need the approval loop, and one plain request is the shortest
+    # path there is. Should the agent ask for a tool anyway, the reply will be
+    # its preamble instead of an array, `_parse_suggestions` will find nothing,
+    # and the caller reports that rather than showing "I'll check that for you."
+    # as a question.
+    answer = _blocking(messages, timeout=SUGGESTION_TIMEOUT)
+    return _parse_suggestions(answer["reply"])
+
+
+def suggestions(context: str = "", *, refresh: bool = False) -> dict:
+    """
+    Starter questions for the chat tab, written by the agent.
+
+    `context` is a short fact block about the portfolio, built by the caller,
+    which the agent answers from instead of calling tools.
+
+    Returns {"suggestions": [...], "cached": bool, "ttl": int}. Raises ChatError
+    when the agent is not configured or could not answer - the caller shows that
+    instead of questions, because there is deliberately no hardcoded list to
+    show in its place.
     """
     if not is_configured():
         raise ChatError(status()["message"])
 
-    now = time.monotonic()
-    if (
-        not refresh
-        and _suggestion_cache["questions"]
-        and now - _suggestion_cache["at"] < SUGGESTION_TTL
-    ):
-        return {
-            "suggestions": list(_suggestion_cache["questions"]),
-            "cached": True,
-            "ttl": SUGGESTION_TTL,
-        }
+    key = hashlib.sha256((context or "").encode("utf-8")).hexdigest()[:16]
+    if not refresh:
+        held = _cached(key)
+        if held:
+            return {"suggestions": held, "cached": True, "ttl": SUGGESTION_TTL}
 
-    # auto_approve is forced for the same reason `ask()` forces it: this runs
-    # while the tab is opening, with nobody watching a chat window to click
-    # Accept on a read-only lookup.
-    answer = ask([{"role": "user", "content": SUGGESTION_REQUEST}])
-    questions = _parse_suggestions(answer["reply"])
-    if not questions:
-        raise ChatError("The agent did not return any questions.")
+    with _suggestion_lock:
+        # Someone else may have generated them while this call waited.
+        if not refresh:
+            held = _cached(key)
+            if held:
+                return {"suggestions": held, "cached": True, "ttl": SUGGESTION_TTL}
 
-    _suggestion_cache["questions"] = questions
-    _suggestion_cache["at"] = now
+        questions = _generate(context)
+        if not questions:
+            raise ChatError("The agent did not return any questions.")
+
+        _suggestion_cache.update({"key": key, "at": time.monotonic(), "questions": questions})
+
     logger.info("Generated %d chat suggestions", len(questions))
     return {"suggestions": questions, "cached": False, "ttl": SUGGESTION_TTL}

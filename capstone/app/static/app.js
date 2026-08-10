@@ -887,15 +887,25 @@ async function loadChat() {
 
 // ------------------------------------------------------- agent suggestions
 //
-// The openers are not a list in this file. The agent writes them when the tab
-// opens, having looked at the actual holdings, watchlist and plan first, so a
-// portfolio holding NVDA is offered questions about NVDA. The server caches
-// them, so switching tabs does not spend a turn every time. There is
-// deliberately no canned fallback: if the agent cannot answer, the tab says so
-// and offers a retry, rather than passing off a fixed list as its idea.
+// The openers are not a list in this file. The agent writes them, so a
+// portfolio holding NVDA is offered questions about NVDA and someone with no
+// plan is offered the question that creates one. There is deliberately no
+// canned fallback: if the agent cannot answer, the row says so and offers a
+// retry rather than passing off a fixed list as its idea.
+//
+// Three things keep that off the critical path of opening the tab, because
+// waiting on a model to be told what you could ask is a bad trade:
+//
+//   1. the server sends the portfolio facts in the prompt, so the agent needs
+//      no tool calls - see `_suggestion_context` in app.py;
+//   2. the page prefetches on load, so the turn is usually already spent by the
+//      time the Chat tab is clicked;
+//   3. what came back is kept in sessionStorage and rendered instantly on the
+//      next open, then quietly revalidated.
 
 const suggestionBox = document.getElementById("chat-suggestions");
-let suggestionsPending = false;
+const SUGGESTION_STORE = "capstone-suggestions";
+let suggestionsPending = null;
 
 // The sparkle and the violet tint are the whole tell: these came from the
 // model, not from the app.
@@ -904,11 +914,20 @@ const AI_NOTE = (text, busy) =>
    <button type="button" class="ai-refresh" data-suggest-refresh="1"
            title="Ask the agent for new questions" ${busy ? "disabled" : ""}>&#8635;</button></p>`;
 
+function storedSuggestions() {
+  try {
+    const held = JSON.parse(sessionStorage.getItem(SUGGESTION_STORE) || "null");
+    return held && Array.isArray(held.questions) && held.questions.length ? held.questions : null;
+  } catch {
+    return null;
+  }
+}
+
 function renderSuggestions(state, payload) {
   if (state === "loading") {
     // Ghost chips rather than a spinner: the row keeps its height, so the chat
     // log below does not jump when the real questions land.
-    const ghosts = ["13rem", "17rem", "10rem", "15rem"]
+    const ghosts = ["13rem", "17rem", "10rem"]
       .map((width) => `<span class="chip ai ghost" style="width:${width}"></span>`)
       .join("");
     suggestionBox.innerHTML = AI_NOTE("Your agent is thinking of some questions&hellip;", true) +
@@ -934,20 +953,41 @@ function renderSuggestions(state, payload) {
       .join("")}</div>`;
 }
 
+// Fetches once even if the tab open and the page-load prefetch land together:
+// the in-flight promise is shared rather than started twice.
+function fetchSuggestions(refresh) {
+  if (suggestionsPending) return suggestionsPending;
+  suggestionsPending = api(`/api/chat/suggestions${refresh ? "?refresh=1" : ""}`)
+    .then((body) => {
+      const questions = body.suggestions || [];
+      if (questions.length) {
+        sessionStorage.setItem(SUGGESTION_STORE, JSON.stringify({ questions }));
+      }
+      return questions;
+    })
+    .finally(() => {
+      suggestionsPending = null;
+    });
+  return suggestionsPending;
+}
+
 async function loadSuggestions(refresh = false) {
-  if (suggestionsPending) return;
-  suggestionsPending = true;
-  renderSuggestions("loading");
+  // Anything already known goes up immediately; the refresh button is the one
+  // case where the user asked for new ones and should see them being written.
+  const held = refresh ? null : storedSuggestions();
+  if (held) renderSuggestions("ok", held);
+  else renderSuggestions("loading");
+
   try {
-    const body = await api(`/api/chat/suggestions${refresh ? "?refresh=1" : ""}`);
-    renderSuggestions("ok", body.suggestions || []);
+    const questions = await fetchSuggestions(refresh);
+    if (questions.length) renderSuggestions("ok", questions);
+    else if (!held) renderSuggestions("error", "the agent returned nothing");
   } catch (err) {
     // Kept inside the suggestion row on purpose. Openers are a nicety; failing
     // to write them should not raise the page-wide error banner as if the chat
-    // itself were broken, because it is not.
-    renderSuggestions("error", err.message);
-  } finally {
-    suggestionsPending = false;
+    // itself were broken, because it is not. If chips are already on screen
+    // they stay - stale questions beat an error message.
+    if (!held) renderSuggestions("error", err.message);
   }
 }
 
@@ -1465,3 +1505,14 @@ document.getElementById("chat-clear").addEventListener("click", () => {
 // -------------------------------------------------------------------- boot
 
 loadTab("overview");
+
+// Warm the chat openers while the user is reading the overview. Nothing is
+// rendered here - the answer lands in sessionStorage and the server cache, so
+// opening the Chat tab later shows chips immediately instead of ghosts. It is
+// fire-and-forget on purpose: a failure is the chat tab's problem to report
+// when it opens, not the overview's.
+api("/api/chat/status")
+  .then((status) => {
+    if (status.configured) return fetchSuggestions(false);
+  })
+  .catch(() => {});

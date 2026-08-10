@@ -832,6 +832,58 @@ def chat_status():
     return jsonify(agent_chat.status())
 
 
+def _suggestion_context() -> str:
+    """
+    A short snapshot of the portfolio for the agent to write openers from.
+
+    This exists to keep the chat tab fast. The agent could fetch all of it
+    through the MCP server, but that is several round trips before it writes a
+    single token, and the app is already holding the same rows - so it spends
+    one cheap query set here and hands the facts over in the prompt instead.
+
+    Kept small and stable on purpose: it is hashed to key the suggestion cache,
+    so anything that wobbles between calls (a timestamp, a live price) would
+    throw the cache away on every page load.
+    """
+    holdings = schema.list_holdings()
+    watchlist = schema.list_watchlist()
+    plan = schema.active_plan()
+    days = schema.days_since_last_report()
+    sentiment = schema.sentiment_summary(days=30)[:5]
+    pending = schema.stats().get("pending_trades") or 0
+
+    def symbols(rows, key="symbol"):
+        found = [str(row[key]).upper() for row in rows if row.get(key)]
+        return ", ".join(sorted(set(found))[:15]) or "none"
+
+    kinds = sorted({str(row["holding_type"]) for row in holdings})
+    lines = [
+        f"Holdings: {len(holdings)} ({', '.join(kinds) or 'none'}).",
+        f"Tickers held: {symbols(holdings)}.",
+        f"Watchlist: {symbols(watchlist)}.",
+        (
+            f"Investment plan: '{plan['name']}', goal ${plan['goal_amount']:,.0f}, "
+            f"{plan['expected_annual_rate']}%/yr over {plan['years']} years."
+            if plan
+            else "Investment plan: none set up yet."
+        ),
+        (
+            f"Last net worth report: {days} days ago."
+            if days is not None
+            else "Last net worth report: none has ever been recorded."
+        ),
+        f"Pending trade proposals: {pending}.",
+    ]
+    if sentiment:
+        scored = ", ".join(
+            f"{row['symbol']} {row['score']} over {row['articles']} articles" for row in sentiment
+        )
+        lines.append(f"News sentiment, last 30 days: {scored}.")
+    else:
+        lines.append("News sentiment: no articles stored yet.")
+    return "\n".join(lines)
+
+
 @app.route("/api/chat/suggestions")
 def chat_suggestions():
     """
@@ -843,7 +895,7 @@ def chat_suggestions():
     """
     refresh = request.args.get("refresh") in ("1", "true", "yes")
     try:
-        return jsonify(agent_chat.suggestions(refresh=refresh))
+        return jsonify(agent_chat.suggestions(_suggestion_context(), refresh=refresh))
     except agent_chat.ChatError as err:
         return jsonify({"error": str(err), "suggestions": []}), 502
 

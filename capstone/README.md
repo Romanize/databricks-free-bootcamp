@@ -443,20 +443,29 @@ schema (default `main.capstone_analytics`, a widget).
   single-use key the user alone can mint on the Trades tab — the human stays in the loop
   by that key, not by this checkbox.
 
-  **The starter chips are written by the agent, not by the app.** Opening the tab calls
-  `GET /api/chat/suggestions`, which spends one turn asking the agent for a handful of
-  openers *after* it has looked at the holdings, watchlist, plan and sentiment — so the
-  questions name real tickers and offer to fix what is actually missing, and they change
-  as the portfolio does. The agent replies with a bare JSON array (the one place its
-  prompt allows raw JSON, since the reply is parsed into buttons and never shown as
-  text) and the app caches it for `CAPSTONE_CHAT_SUGGESTION_TTL` seconds so tab
-  switching does not cost a turn each time; the ↻ beside the chips forces a fresh set.
-  There is no hardcoded fallback list on purpose — if the agent cannot answer, the row
-  says so and offers a retry rather than passing off canned questions as its own, and
-  the failure stays inside the chip row instead of raising the page-wide error banner.
-  Generated chips are marked with a sparkle and a violet tint, the one hue the
-  stylesheet does not use for anything meaningful, so it is never ambiguous which text
-  on the page came from the model.
+  **The starter chips are written by the agent, not by the app.** `GET
+  /api/chat/suggestions` spends one turn asking for three openers, and the agent replies
+  with a bare JSON array — the one place its prompt allows raw JSON, since the reply is
+  parsed into buttons and never shown as text. So the questions name the user's real
+  tickers and offer to fix what is actually missing, and they change as the portfolio
+  does. There is no hardcoded fallback list on purpose: if the agent cannot answer, the
+  row says so and offers a retry rather than passing off canned questions as its own,
+  and the failure stays inside the chip row instead of raising the page-wide error
+  banner. Generated chips carry a sparkle and a violet tint, the one hue the stylesheet
+  does not use for anything meaningful, so it is never ambiguous which text on the page
+  came from the model.
+
+  Getting told what you could ask should not cost a wait, so this is the cheapest turn
+  in the app. **The agent calls no tools for it** — `_suggestion_context()` pastes the
+  holdings, watchlist, plan, report age, pending proposals and 30-day sentiment straight
+  into the prompt, because the app is already holding those rows and an MCP round trip
+  per fact bought nothing the app could not supply for free. On top of that: a 25s
+  timeout rather than the chat's 120s; a server cache keyed on a **hash of those facts**,
+  so switching tabs is free but adding a holding invalidates it; single-flight locking so
+  the prefetch and the tab open never generate twice; a fire-and-forget prefetch at page
+  load while the user is still on the overview; and a `sessionStorage` copy that renders
+  instantly on the next open and revalidates behind it. The first open of a cold app
+  shows pulsing ghost chips; every open after that is immediate.
 
 ## Known limitations / what I'd do next
 
